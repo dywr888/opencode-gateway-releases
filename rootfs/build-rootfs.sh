@@ -45,9 +45,9 @@ if [ "$(id -u)" = "0" ]; then
   trap cleanup_mounts EXIT
   chroot "$ROOT" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
     /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends git ca-certificates && apt-get clean && rm -rf /var/lib/apt/lists/*"
+  chroot "$ROOT" git --version
   cleanup_mounts
   trap - EXIT
-  chroot "$ROOT" git --version
 else
   echo "!! 非 root，无法 chroot 安装 git（CI 请用 sudo 运行本脚本）"
 fi
