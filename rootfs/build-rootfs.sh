@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # 生成可在 Android(arm64) 上运行的 rootfs：ubuntu-base + Termux 版 proot(+loader) + opencode。
-# 关键：proot 必须用 Termux 版本（bionic/NDK 编译，走 /system/bin/linker64），
-#       并带上 libexec/proot/loader 与依赖库 libtalloc/libandroid-shmem。
+# 关键点：
+#  1) proot 必须用 Termux 版（bionic/NDK 编译，走 /system/bin/linker64），
+#     并带上 libexec/proot/loader 与依赖库 libtalloc/libandroid-shmem。
+#  2) 打包用 --hard-dereference 展开硬链接：Android app(untrusted_app) SELinux 禁止 link()，
+#     设备端 toybox tar 建硬链会失败。
 set -euo pipefail
 
 ARCH="arm64"
@@ -44,7 +47,6 @@ echo "== 4) Termux proot + loader + 依赖库 =="
 mkdir -p "$ROOT/proot/bin" "$ROOT/proot/lib" "$ROOT/proot/libexec"
 curl -fsSL "$TERMUX_MIRROR/dists/stable/main/binary-aarch64/Packages" -o /tmp/tpkgs
 
-# 按行解析：找到 "Package: X" 后，取随后第一个 Filename:
 fn() {
   awk -v pkg="$1" '
     $1=="Package:" && $2==pkg {found=1; next}
@@ -99,5 +101,9 @@ echo "== 5) 体积统计 =="
 du -sh "$ROOT"
 
 echo "== 6) 打包 $OUT =="
-tar -czf "$OUT" -C "$ROOT" .
+tar -czf "$OUT" -C "$ROOT" --hard-dereference .
 echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
+
+echo "== 7) 校验：不应再有硬链接条目 =="
+HL=$(tar -tvf "$OUT" 2>/dev/null | awk '$1 ~ /^h/' | wc -l)
+echo "hardlink entries remaining: $HL"
