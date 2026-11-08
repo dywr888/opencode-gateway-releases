@@ -28,6 +28,23 @@ import java.net.URL
  * - **下载/解压/启动进度通过广播 EXTRA_PROGRESS 传回 UI，0-100，-1 表示不定长**。
  */
 class GatewayService : Service() {
+    private fun fetchModelSummary() {
+        try {
+            val gw = Companion.gatewayUrl ?: return
+            val conn = java.net.URL("$gw/models").openConnection() as java.net.HttpURLConnection
+            conn.connectTimeout = 5000
+            conn.readTimeout = 5000
+            val body = conn.inputStream.bufferedReader().readText()
+            conn.disconnect()
+            val arr = org.json.JSONObject(body).optJSONArray("data") ?: return
+            if (arr.length() == 0) return
+            val names = (0 until minOf(arr.length(), 2)).map {
+                arr.getJSONObject(it).optString("id").substringAfter('/')
+            }
+            Companion.modelSummary = "${arr.length()} 个 · ${names.joinToString("、")} 等"
+        } catch (_: Exception) {}
+    }
+
     companion object {
         const val ACTION_START = "com.ocgw.app.START"
         const val ACTION_STOP = "com.ocgw.app.STOP"
@@ -70,6 +87,18 @@ class GatewayService : Service() {
         const val GATEWAY_PORT = 4318
         const val OPENCODE_PORT = 4317
         const val DEFAULT_MODEL = "opencode/big-pickle"
+
+        // ===== 供 UI 轮询的静态状态（照 OurFreeModel 的做法）=====
+        @Volatile var running = false
+        @Volatile var actualPort = GATEWAY_PORT
+        @Volatile var lastError: String? = null
+        @Volatile var progressPct = -1
+        @Volatile var progressMsg = ""
+        @Volatile var uiUrl: String? = null
+        @Volatile var uiPassword: String? = null
+        @Volatile var gatewayUrl: String? = null
+        @Volatile var apiKey: String = ""
+        @Volatile var modelSummary: String = ""
     }
 
     private var proc: Process? = null
@@ -142,6 +171,25 @@ class GatewayService : Service() {
         url: String? = null, password: String? = null, gatewayUrl: String? = null,
         progress: Int = -1,
     ) {
+        Companion.progressPct = progress
+        Companion.progressMsg = message
+        when (phase) {
+            PHASE_RUNNING -> {
+                Companion.running = true
+                Companion.lastError = null
+                Thread { fetchModelSummary() }.start()
+                if (url != null) Companion.uiUrl = url
+                if (password != null) Companion.uiPassword = password
+                if (gatewayUrl != null) Companion.gatewayUrl = gatewayUrl
+            }
+            PHASE_STOPPED -> {
+                Companion.running = false
+            }
+            PHASE_FAILED -> {
+                Companion.running = false
+                Companion.lastError = message
+            }
+        }
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(message, running, progress))
         sendBroadcast(Intent(ACTION_STATE).apply {
             putExtra(EXTRA_PHASE, phase)
@@ -277,6 +325,7 @@ class GatewayService : Service() {
 
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         serverPassword = password
+        Companion.apiKey = "ocgw-" + (0..23).map { "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789"[(Math.random() * 56).toInt()] }.joinToString("")
 
         val prootBin = File(root, "proot/bin/proot").absolutePath
         val prootLib = File(root, "proot/lib").absolutePath
@@ -474,6 +523,10 @@ class GatewayService : Service() {
         proc = null
         try { wakeLock?.release() } catch (_: Exception) {}
         wakeLock = null
+        Companion.running = false
+        Companion.uiUrl = null
+        Companion.uiPassword = null
+        Companion.gatewayUrl = null
         publish(PHASE_STOPPED, "已停止", false, progress = -1)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
