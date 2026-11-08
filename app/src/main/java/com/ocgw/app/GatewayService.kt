@@ -447,21 +447,7 @@ class GatewayService : Service() {
         if (!staging.mkdirs() && !staging.exists()) throw RuntimeException("cannot create staging")
 
         val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", staging.absolutePath).start()
-        // 解压进度没法精确，用 indeterminate 或简单心跳
-        var extractTick = 0L
-        val extractWatcher = Thread {
-            while (!Thread.currentThread().isInterrupted && !stopping) {
-                Thread.sleep(1000)
-                if (stopping) return
-                publish(PHASE_EXTRACT, "正在解压…", true, progress = (extractTick % 4) * 25)
-                extractTick++
-            }
-        }
-        extractWatcher.start()
-
-        val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", staging.absolutePath).start()
         val rc = p.waitFor()
-        extractWatcher.interrupt()
         if (rc != 0) {
             val err = p.errorStream.bufferedReader().readText()
             staging.deleteRecursively()
