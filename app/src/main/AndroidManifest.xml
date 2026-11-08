@@ -18,6 +18,8 @@
     <application
         android:allowBackup="true"
         android:label="OpenCode"
+        android:icon="@drawable/ic_launcher"
+        android:roundIcon="@drawable/ic_launcher_round"
         android:supportsRtl="true"
         android:usesCleartextTraffic="true"
         android:requestLegacyExternalStorage="true"
