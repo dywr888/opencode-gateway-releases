@@ -18,10 +18,11 @@ import java.net.URL
  * 前台服务：拉起 opencode serve（proot + rootfs 内），广播监听地址与密码给 UI。
  *
  * 关键点（均已实测验证）：
- * - proot 必须用 Termux 版（bionic/NDK），并设 LD_LIBRARY_PATH 指向 libtalloc/libandroid-shmem，
- *   PROOT_LOADER 指向 libexec/proot/loader。
- * - Android 系统 tar 是 toybox，只用 -xzf；解压前清空目标目录。
- * - startForeground 立刻调用；重活在后台线程；running 守卫防重复启动。
+ * - proot 用 Termux 版（bionic/NDK），需 LD_LIBRARY_PATH 指向 proot/lib，PROOT_LOADER 指向 libexec/loader。
+ * - targetSdk 必须 <= 28，否则 Android 10+ 禁止 exec app 数据目录里的可执行文件（W^X）。
+ * - Android 系统 tar 是 toybox，只用 -xzf。
+ * - 解压到 staging 目录后原子替换，避免并发/残留导致目录消失。
+ * - 单 worker 守卫：同一时刻只允许一个准备/启动任务。
  */
 class GatewayService : Service() {
     companion object {
@@ -46,15 +47,15 @@ class GatewayService : Service() {
         const val PHASE_RUNNING = "running"
         const val PHASE_STOPPED = "stopped"
         const val PHASE_FAILED = "failed"
-
-        const val EXPECTED_SIZE = 159000000L // 约值，用于判断是否已完整（实际以 Content-Length 为准）
     }
 
     private var proc: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
-    @Volatile private var worker: Thread? = null
+
+    // 单 worker 守卫：busy 为真时忽略重复 START
+    private val lock = Any()
+    @Volatile private var busy = false
     @Volatile private var stopping = false
-    @Volatile private var running = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -67,11 +68,14 @@ class GatewayService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 startForeground(NOTIF_ID, buildNotification(getString(R.string.downloading), true))
-                if (running || worker?.isAlive == true) {
-                    Log.i("GatewayService", "already running; ignore duplicate START")
-                } else {
-                    startGatewayAsync()
+                synchronized(lock) {
+                    if (busy) {
+                        Log.i("GatewayService", "busy; ignore duplicate START")
+                        return START_STICKY
+                    }
+                    busy = true
                 }
+                startGatewayAsync()
             }
             ACTION_STOP -> stopGateway()
         }
@@ -113,23 +117,30 @@ class GatewayService : Service() {
 
     private fun startGatewayAsync() {
         stopping = false
-        running = true
-        worker = Thread {
+        Thread {
             try {
                 val root = File(filesDir, "rootfs")
-                if (!File(root, "opencode/bin/opencode").exists()) {
+                if (!ready(root)) {
                     downloadAndExtract(root)
-                    if (!File(root, "opencode/bin/opencode").exists()) return@Thread
                 }
                 if (stopping) return@Thread
+                if (!ready(root)) throw RuntimeException("rootfs incomplete after extract")
                 startServer(root)
             } catch (e: Exception) {
                 Log.e("GatewayService", "prepare/start failed", e)
                 publish(PHASE_FAILED, getString(R.string.failed, e.message ?: e.javaClass.simpleName), false)
                 stopSelf()
+            } finally {
+                synchronized(lock) { busy = false }
             }
-        }.also { it.start() }
+        }.start()
     }
+
+    private fun ready(root: File): Boolean =
+        File(root, "opencode/bin/opencode").exists() &&
+            File(root, "proot/bin/proot").exists() &&
+            File(root, "proot/libexec/loader").exists() &&
+            File(root, "proot/lib/libtalloc.so.2").exists()
 
     private fun pickFastestMirror(): String {
         var best = ORIGINAL
@@ -153,6 +164,20 @@ class GatewayService : Service() {
             }
         }
         return best
+    }
+
+    /** 查询远端大小（用于判断本地缓存是否完整） */
+    private fun remoteSize(url: String): Long {
+        return try {
+            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                connectTimeout = 8000
+                readTimeout = 8000
+                requestMethod = "HEAD"
+            }
+            val len = conn.contentLengthLong
+            conn.disconnect()
+            len
+        } catch (_: Exception) { -1L }
     }
 
     private fun startServer(root: File) {
@@ -182,7 +207,6 @@ class GatewayService : Service() {
             "HOME" to "/root",
             "PATH" to "/usr/local/bin:/usr/bin:/bin",
             "TMPDIR" to "/tmp",
-            // 关键：proot 自身的运行库与 loader
             "LD_LIBRARY_PATH" to prootLib,
             "PROOT_LOADER" to prootLoader,
             "PROOT_TMP_DIR" to cacheDir.absolutePath
@@ -206,10 +230,8 @@ class GatewayService : Service() {
 
         val url = "http://127.0.0.1:$port"
         if (waitForReady(url, password)) {
-            running = true
             publish(PHASE_RUNNING, getString(R.string.running), true, url, password)
         } else {
-            running = false
             publish(PHASE_FAILED, getString(R.string.failed, "server not ready (check opencode.log)"), false)
             stopSelf()
         }
@@ -240,10 +262,17 @@ class GatewayService : Service() {
         Log.i("GatewayService", "download from $url")
         val tmp = File(cacheDir, "rootfs-arm64.tar.gz")
 
-        var existing = if (tmp.exists()) tmp.length() else 0L
+        // 本地缓存若不完整（大小与远端不符），删掉重下，避免续传污染
+        val expect = remoteSize(url)
+        if (tmp.exists() && expect > 0 && tmp.length() != expect) {
+            Log.i("GatewayService", "cached size ${tmp.length()} != remote $expect, restart download")
+            tmp.delete()
+        }
+
         var attempt = 0
         while (true) {
             attempt++
+            var existing = if (tmp.exists()) tmp.length() else 0L
             try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 15000
@@ -252,9 +281,8 @@ class GatewayService : Service() {
                 }
                 val code = conn.responseCode
                 if (code == 416) {
-                    // 断点越界：服务端认为已完成或范围无效，重头下
                     conn.disconnect()
-                    tmp.delete(); existing = 0L
+                    tmp.delete()
                     throw RuntimeException("http 416 (reset)")
                 }
                 val appending = code == 206 && existing > 0
@@ -283,7 +311,6 @@ class GatewayService : Service() {
             } catch (e: Exception) {
                 if (stopping) return
                 Log.w("GatewayService", "download attempt $attempt failed: ${e.message}")
-                existing = if (tmp.exists()) tmp.length() else 0L
                 if (attempt >= 6) throw e
                 Thread.sleep(2000)
             }
@@ -291,20 +318,36 @@ class GatewayService : Service() {
 
         if (stopping) return
         publish(PHASE_EXTRACT, getString(R.string.extracting), true)
-        dest.deleteRecursively()
-        dest.mkdirs()
-        // toybox tar：只用 -xzf（先清空目标目录即可避免硬链接冲突）
-        val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", dest.absolutePath).start()
+
+        // 解压到 staging，成功后再原子替换，避免并发/残留
+        val staging = File(filesDir, "rootfs.staging")
+        staging.deleteRecursively()
+        if (!staging.mkdirs() && !staging.exists()) throw RuntimeException("cannot create staging dir")
+
+        val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", staging.absolutePath).start()
         val rc = p.waitFor()
         if (rc != 0) {
             val err = p.errorStream.bufferedReader().readText()
+            staging.deleteRecursively()
             throw RuntimeException("extract failed($rc): $err")
         }
+        // 校验关键文件
+        if (!File(staging, "opencode/bin/opencode").exists()) {
+            staging.deleteRecursively()
+            throw RuntimeException("extract ok but opencode missing")
+        }
+        dest.deleteRecursively()
+        if (!staging.renameTo(dest)) {
+            // rename 失败则退化为拷贝目录（同分区一般能成功）
+            staging.copyRecursively(dest, overwrite = true)
+            staging.deleteRecursively()
+        }
+        Log.i("GatewayService", "rootfs ready at ${dest.absolutePath}")
     }
 
     private fun stopGateway() {
         stopping = true
-        running = false
+        synchronized(lock) { busy = false }
         try { proc?.destroy() } catch (_: Exception) {}
         proc = null
         try { wakeLock?.release() } catch (_: Exception) {}
