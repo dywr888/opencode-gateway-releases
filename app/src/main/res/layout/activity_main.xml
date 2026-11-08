@@ -1,89 +1,245 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical"
-    android:padding="16dp"
-    android:gravity="center_horizontal">
+    android:background="#FFFFFF"
+    android:fillViewport="true">
 
-    <TextView
-        android:id="@+id/status"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="16sp"
-        android:textColor="#111111"
-        android:layout_marginTop="16dp"
-        android:gravity="center"
-        android:text="未启动" />
+        android:orientation="vertical"
+        android:padding="20dp">
 
-    <ProgressBar
-        android:id="@+id/progress"
-        style="@android:style/Widget.ProgressBar.Horizontal"
-        android:layout_width="match_parent"
-        android:layout_height="12dp"
-        android:layout_marginTop="12dp"
-        android:layout_marginHorizontal="8dp"
-        android:max="100"
-        android:progress="0"
-        android:visibility="gone" />
+        <!-- 标题 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="OpenCode"
+            android:textSize="34sp"
+            android:textStyle="bold"
+            android:textColor="#111111"
+            android:layout_marginTop="24dp" />
 
-    <TextView
-        android:id="@+id/progressText"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="13sp"
-        android:textColor="#666666"
-        android:layout_marginTop="4dp"
-        android:gravity="center"
-        android:text=""
-        android:visibility="gone" />
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="本地网关 · 免费模型"
+            android:textSize="14sp"
+            android:textColor="#888888"
+            android:layout_marginTop="2dp" />
 
-    <Button
-        android:id="@+id/pickBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/pick_project"
-        android:layout_marginTop="20dp" />
+        <!-- 状态条 -->
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical"
+            android:background="@drawable/pill_bg"
+            android:paddingStart="14dp"
+            android:paddingEnd="16dp"
+            android:paddingTop="9dp"
+            android:paddingBottom="9dp"
+            android:layout_marginTop="18dp">
 
-    <TextView
-        android:id="@+id/projectPath"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="12sp"
-        android:text="@string/no_project"
-        android:gravity="center"
-        android:layout_marginTop="4dp" />
+            <View
+                android:id="@+id/statusDot"
+                android:layout_width="9dp"
+                android:layout_height="9dp"
+                android:background="@drawable/dot_gray" />
 
-    <Button
-        android:id="@+id/startBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/start"
-        android:layout_marginTop="20dp" />
+            <TextView
+                android:id="@+id/status"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="未启动 · 端口 4318"
+                android:textSize="14sp"
+                android:textStyle="bold"
+                android:textColor="#444444"
+                android:layout_marginStart="8dp" />
+        </LinearLayout>
 
-    <Button
-        android:id="@+id/openBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/open_chat"
-        android:enabled="false"
-        android:layout_marginTop="12dp" />
+        <!-- 进度（下载/解压时显示） -->
+        <ProgressBar
+            android:id="@+id/progress"
+            style="@android:style/Widget.ProgressBar.Horizontal"
+            android:layout_width="match_parent"
+            android:layout_height="10dp"
+            android:layout_marginTop="16dp"
+            android:max="100"
+            android:progress="0"
+            android:progressDrawable="@drawable/progress_horizontal"
+            android:visibility="gone" />
 
-    <Button
-        android:id="@+id/stopBtn"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:text="@string/stop"
-        android:enabled="false"
-        android:layout_marginTop="12dp" />
+        <TextView
+            android:id="@+id/progressText"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textSize="12sp"
+            android:textColor="#888888"
+            android:gravity="center"
+            android:layout_marginTop="4dp"
+            android:text=""
+            android:visibility="gone" />
 
-    <TextView
-        android:id="@+id/gatewayInfo"
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:textSize="11sp"
-        android:layout_marginTop="16dp"
-        android:gravity="center"
-        android:textIsSelectable="true"
-        android:text="" />
-</LinearLayout>
+        <!-- 接入信息卡片 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:background="@drawable/card_bg"
+            android:padding="18dp"
+            android:layout_marginTop="18dp">
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="接入信息"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="#111111" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Base URL"
+                android:textSize="12sp"
+                android:textColor="#888888"
+                android:layout_marginTop="14dp" />
+
+            <TextView
+                android:id="@+id/baseUrl"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="http://127.0.0.1:4318/v1"
+                android:textSize="14sp"
+                android:textColor="#3B82F6"
+                android:textIsSelectable="true"
+                android:layout_marginTop="3dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="API Key"
+                android:textSize="12sp"
+                android:textColor="#888888"
+                android:layout_marginTop="12dp" />
+
+            <TextView
+                android:id="@+id/apiKey"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="无需填写（仅本机可访问）"
+                android:textSize="13sp"
+                android:textColor="#444444"
+                android:textIsSelectable="true"
+                android:layout_marginTop="3dp" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="模型"
+                android:textSize="12sp"
+                android:textColor="#888888"
+                android:layout_marginTop="12dp" />
+
+            <TextView
+                android:id="@+id/modelInfo"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="启动后显示可用模型"
+                android:textSize="13sp"
+                android:textColor="#444444"
+                android:textIsSelectable="true"
+                android:layout_marginTop="3dp" />
+        </LinearLayout>
+
+        <!-- 按钮：启动 / 停止 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="16dp">
+
+            <Button
+                android:id="@+id/startBtn"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="启动"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/btn_green"
+                android:layout_marginEnd="6dp" />
+
+            <Button
+                android:id="@+id/stopBtn"
+                android:layout_width="0dp"
+                android:layout_height="52dp"
+                android:layout_weight="1"
+                android:text="停止"
+                android:textSize="15sp"
+                android:textStyle="bold"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/btn_red"
+                android:enabled="false"
+                android:layout_marginStart="6dp" />
+        </LinearLayout>
+
+        <!-- 按钮：管理(Web UI) / 日志 / 选目录 -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:layout_marginTop="10dp">
+
+            <Button
+                android:id="@+id/manageBtn"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:text="管理"
+                android:textSize="14sp"
+                android:textColor="#FFFFFF"
+                android:background="@drawable/btn_blue"
+                android:enabled="false"
+                android:layout_marginEnd="5dp" />
+
+            <Button
+                android:id="@+id/logBtn"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:text="日志"
+                android:textSize="14sp"
+                android:textColor="#333333"
+                android:background="@drawable/btn_gray"
+                android:layout_marginStart="5dp"
+                android:layout_marginEnd="5dp" />
+
+            <Button
+                android:id="@+id/pickBtn"
+                android:layout_width="0dp"
+                android:layout_height="48dp"
+                android:layout_weight="1"
+                android:text="选目录"
+                android:textSize="14sp"
+                android:textColor="#333333"
+                android:background="@drawable/btn_gray"
+                android:layout_marginStart="5dp" />
+        </LinearLayout>
+
+        <!-- 当前项目 -->
+        <TextView
+            android:id="@+id/projectPath"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="未选择项目目录"
+            android:textSize="12sp"
+            android:textColor="#999999"
+            android:gravity="center"
+            android:layout_marginTop="12dp" />
+
+    </LinearLayout>
+</ScrollView>
