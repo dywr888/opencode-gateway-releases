@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
 import android.content.Intent
+import android.net.ConnectivityManager
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
@@ -21,8 +22,8 @@ import java.net.URL
  * - proot 用 Termux 版（bionic/NDK），需 LD_LIBRARY_PATH 指向 proot/lib，PROOT_LOADER 指向 libexec/loader。
  * - targetSdk 必须 <= 28，否则 Android 10+ 禁止 exec app 数据目录里的可执行文件（W^X）。
  * - Android 系统 tar 是 toybox，只用 -xzf。
- * - 解压到 staging 目录后原子替换，避免并发/残留导致目录消失。
- * - 单 worker 守卫：同一时刻只允许一个准备/启动任务。
+ * - rootfs 已就绪时绝不重复下载（之前 UI 误报"正在下载"）。
+ * - resolv.conf 用系统实际 DNS 生成：写死 8.8.8.8 在纯 IPv6 蜂窝网下解析不了。
  */
 class GatewayService : Service() {
     companion object {
@@ -41,6 +42,9 @@ class GatewayService : Service() {
             "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
         val MIRRORS = listOf("https://gh-proxy.com/", "https://ghproxy.net/", "")
 
+        // 兜底 DNS（系统 DNS 读不到时使用）
+        private val FALLBACK_DNS = listOf("223.5.5.5", "114.114.114.114", "8.8.8.8")
+
         const val PHASE_DOWNLOAD = "download"
         const val PHASE_EXTRACT = "extract"
         const val PHASE_STARTING = "starting"
@@ -52,7 +56,6 @@ class GatewayService : Service() {
     private var proc: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
 
-    // 单 worker 守卫：busy 为真时忽略重复 START
     private val lock = Any()
     @Volatile private var busy = false
     @Volatile private var stopping = false
@@ -67,7 +70,11 @@ class GatewayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                startForeground(NOTIF_ID, buildNotification(getString(R.string.downloading), true))
+                // 已就绪就用"正在启动"，避免误导用户以为在重复下载
+                val alreadyReady = ready(File(filesDir, "rootfs"))
+                val initial = if (alreadyReady) getString(R.string.starting) else getString(R.string.downloading)
+                startForeground(NOTIF_ID, buildNotification(initial, true))
+
                 synchronized(lock) {
                     if (busy) {
                         Log.i("GatewayService", "busy; ignore duplicate START")
@@ -122,6 +129,8 @@ class GatewayService : Service() {
                 val root = File(filesDir, "rootfs")
                 if (!ready(root)) {
                     downloadAndExtract(root)
+                } else {
+                    Log.i("GatewayService", "rootfs already present; skip download")
                 }
                 if (stopping) return@Thread
                 if (!ready(root)) throw RuntimeException("rootfs incomplete after extract")
@@ -141,6 +150,42 @@ class GatewayService : Service() {
             File(root, "proot/bin/proot").exists() &&
             File(root, "proot/libexec/loader").exists() &&
             File(root, "proot/lib/libtalloc.so.2").exists()
+
+    /**
+     * 用系统当前网络的 DNS 生成 rootfs/etc/resolv.conf。
+     * 纯 IPv6 蜂窝网络下写死 8.8.8.8 会 getaddrinfo EAI_AGAIN。
+     */
+    private fun writeResolvConf(root: File) {
+        val servers = LinkedHashSet<String>()
+        try {
+            val cm = getSystemService(ConnectivityManager::class.java)
+            cm?.allNetworks?.forEach { net ->
+                try {
+                    cm.getLinkProperties(net)?.dnsServers?.forEach { addr ->
+                        addr.hostAddress?.let {
+                            // 去掉 IPv6 scope
+                            servers.add(it.substringBefore('%'))
+                        }
+                    }
+                } catch (_: Exception) {}
+            }
+        } catch (e: Exception) {
+            Log.w("GatewayService", "read system dns failed: ${e.message}")
+        }
+        // 系统常给出 IPv6 DNS，但容器内 IPv6 路由未必可用，优先补 IPv4 公共 DNS
+        FALLBACK_DNS.forEach { servers.add(it) }
+
+        val content = buildString {
+            servers.take(6).forEach { append("nameserver ").append(it).append('\n') }
+        }
+        try {
+            File(root, "etc").mkdirs()
+            File(root, "etc/resolv.conf").writeText(content)
+            Log.i("GatewayService", "resolv.conf:\n$content")
+        } catch (e: Exception) {
+            Log.w("GatewayService", "write resolv.conf failed: ${e.message}")
+        }
+    }
 
     private fun pickFastestMirror(): String {
         var best = ORIGINAL
@@ -166,7 +211,6 @@ class GatewayService : Service() {
         return best
     }
 
-    /** 查询远端大小（用于判断本地缓存是否完整） */
     private fun remoteSize(url: String): Long {
         return try {
             val conn = (URL(url).openConnection() as HttpURLConnection).apply {
@@ -182,6 +226,8 @@ class GatewayService : Service() {
 
     private fun startServer(root: File) {
         publish(PHASE_STARTING, getString(R.string.starting), true)
+        writeResolvConf(root)
+
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         val port = 4317
 
@@ -262,7 +308,6 @@ class GatewayService : Service() {
         Log.i("GatewayService", "download from $url")
         val tmp = File(cacheDir, "rootfs-arm64.tar.gz")
 
-        // 本地缓存若不完整（大小与远端不符），删掉重下，避免续传污染
         val expect = remoteSize(url)
         if (tmp.exists() && expect > 0 && tmp.length() != expect) {
             Log.i("GatewayService", "cached size ${tmp.length()} != remote $expect, restart download")
@@ -272,7 +317,7 @@ class GatewayService : Service() {
         var attempt = 0
         while (true) {
             attempt++
-            var existing = if (tmp.exists()) tmp.length() else 0L
+            val existing = if (tmp.exists()) tmp.length() else 0L
             try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 15000
@@ -319,7 +364,6 @@ class GatewayService : Service() {
         if (stopping) return
         publish(PHASE_EXTRACT, getString(R.string.extracting), true)
 
-        // 解压到 staging，成功后再原子替换，避免并发/残留
         val staging = File(filesDir, "rootfs.staging")
         staging.deleteRecursively()
         if (!staging.mkdirs() && !staging.exists()) throw RuntimeException("cannot create staging dir")
@@ -331,14 +375,12 @@ class GatewayService : Service() {
             staging.deleteRecursively()
             throw RuntimeException("extract failed($rc): $err")
         }
-        // 校验关键文件
         if (!File(staging, "opencode/bin/opencode").exists()) {
             staging.deleteRecursively()
             throw RuntimeException("extract ok but opencode missing")
         }
         dest.deleteRecursively()
         if (!staging.renameTo(dest)) {
-            // rename 失败则退化为拷贝目录（同分区一般能成功）
             staging.copyRecursively(dest, overwrite = true)
             staging.deleteRecursively()
         }
