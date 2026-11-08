@@ -18,6 +18,13 @@ rm -f /tmp/ubuntu-base.tar.gz
 echo "== 准备 chroot 运行环境（原生 arm64，无需 qemu）=="
 mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts" "$ROOT/tmp"
 chmod 1777 "$ROOT/tmp"
+# 关键：chroot 内需要真正的 /dev/null 等设备，否则 apt-key/gpg 验证失败
+# 复制宿主的 char 设备节点（runner 是 arm64，设备号兼容）
+for dev in null zero urandom random full; do
+  if [ -e "/dev/$dev" ]; then
+    cp -a "/dev/$dev" "$ROOT/dev/$dev" 2>/dev/null || true
+  fi
+done
 # DNS：opencode 联网要用
 echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
 # ubuntu-base 24.04 自带 deb822 的 ubuntu.sources；删除任何旧式 sources.list 避免重复声明冲突
@@ -32,9 +39,8 @@ Architectures: arm64
 EOF
 
 echo "== 安装基础工具（curl/ca-certificates 等）=="
-# 关键：chroot 内 /tmp 必须可写，否则 apt-key GPG 验证会失败
 sudo chroot "$ROOT" /bin/bash -c "mkdir -p /tmp && chmod 1777 /tmp && apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates curl wget libc6 coreutils bash tar gzip" || {
+  ca-certificates curl wget libc6 coreutils bash tar gzip gnupg" || {
     echo "apt 安装失败"; exit 1
   }
 
