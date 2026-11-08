@@ -16,11 +16,7 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 
 /**
- * 主页：极简三步
- *  1) 选项目目录（可选）
- *  2) 启动
- *  3) 自动进入聊天界面
- * 「Web UI」和「网关地址」收进高级区，默认不打扰用户。
+ * 主页：选项目 → 启动 → 自动进聊天。
  */
 class MainActivity : ComponentActivity() {
 
@@ -33,8 +29,6 @@ class MainActivity : ComponentActivity() {
     private lateinit var projectPath: TextView
     private lateinit var gatewayInfo: TextView
 
-    private var uiUrl: String? = null
-    private var uiPassword: String? = null
     private var gatewayUrl: String? = null
 
     private val pickDir = registerForActivityResult(
@@ -48,7 +42,7 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {}
         ProjectStore.save(this, uri)
         refreshProjectLabel()
-        Toast.makeText(this, "已选择目录，下次启动生效", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "已选目录，下次启动会同步文件", Toast.LENGTH_SHORT).show()
     }
 
     private val receiver = object : BroadcastReceiver() {
@@ -66,20 +60,15 @@ class MainActivity : ComponentActivity() {
                     GatewayService.PHASE_RUNNING -> {
                         progress.visibility = ProgressBar.GONE
                         status.text = "已就绪"
-                        uiUrl = intent.getStringExtra(GatewayService.EXTRA_URL)
-                        uiPassword = intent.getStringExtra(GatewayService.EXTRA_PASSWORD)
                         gatewayUrl = intent.getStringExtra(GatewayService.EXTRA_GATEWAY)
                         setRunning(true)
                         gatewayInfo.text = gatewayUrl ?: ""
-                        // 自动进入聊天；Web UI 保留为高级入口
                         launchChat()
                     }
                     GatewayService.PHASE_STOPPED -> {
                         progress.visibility = ProgressBar.GONE
-                        status.text = getString(R.string.stopped)
+                        status.text = "已停止"
                         setRunning(false)
-                        uiUrl = null
-                        uiPassword = null
                         gatewayUrl = null
                         gatewayInfo.text = ""
                     }
@@ -115,16 +104,13 @@ class MainActivity : ComponentActivity() {
         projectPath = findViewById(R.id.projectPath)
         gatewayInfo = findViewById(R.id.gatewayInfo)
 
-        status.text = getString(R.string.stopped)
+        status.text = "未启动"
         setRunning(false)
         refreshProjectLabel()
 
         startBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_START) }
         stopBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_STOP) }
-        openBtn.setOnClickListener {
-            val gw = gatewayUrl ?: return@setOnClickListener
-            launchChat()
-        }
+        openBtn.setOnClickListener { launchChat() }
         pickBtn.setOnClickListener { pickDir.launch(null) }
     }
 
@@ -142,12 +128,11 @@ class MainActivity : ComponentActivity() {
 
     private fun refreshProjectLabel() {
         val uri = ProjectStore.load(this)
-        if (uri == null) {
-            projectPath.text = getString(R.string.no_project)
-            return
+        projectPath.text = if (uri == null) {
+            getString(R.string.no_project)
+        } else {
+            "项目：" + ProjectStore.displayName(this, uri)
         }
-        val path = ProjectStore.resolvePath(this, uri)
-        projectPath.text = path ?: "已选择（无法解析路径）"
     }
 
     private fun startServiceCompat(action: String) {
