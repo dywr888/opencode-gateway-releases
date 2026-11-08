@@ -16,14 +16,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 前台服务：拉起 opencode serve（proot + rootfs 内），广播监听地址与密码给 UI。
+ * 前台服务：拉起 opencode serve（proot + rootfs 内）+ 本地 OpenAI 兼容网关。
  *
- * 关键点（均已实测验证）：
- * - proot 用 Termux 版（bionic/NDK），需 LD_LIBRARY_PATH 指向 proot/lib，PROOT_LOADER 指向 libexec/loader。
- * - targetSdk 必须 <= 28，否则 Android 10+ 禁止 exec app 数据目录里的可执行文件（W^X）。
- * - Android 系统 tar 是 toybox，只用 -xzf。
- * - rootfs 已就绪时绝不重复下载（之前 UI 误报"正在下载"）。
- * - resolv.conf 用系统实际 DNS 生成：写死 8.8.8.8 在纯 IPv6 蜂窝网下解析不了。
+ * 实测要点：
+ * - proot 用 Termux 版（bionic/NDK）：LD_LIBRARY_PATH=proot/lib，PROOT_LOADER=proot/libexec/loader。
+ * - targetSdk <= 28，否则禁止 exec app 数据目录里的可执行文件。
+ * - resolv.conf 用系统实际 DNS：写死 8.8.8.8 在纯 IPv6 蜂窝网下解析不了。
+ * - 用户选了项目目录就用 proot -b <真实路径>:/workspace 挂进来。
  */
 class GatewayService : Service() {
     companion object {
@@ -34,6 +33,7 @@ class GatewayService : Service() {
         const val EXTRA_PASSWORD = "password"
         const val EXTRA_PHASE = "phase"
         const val EXTRA_MESSAGE = "message"
+        const val EXTRA_GATEWAY = "gateway"
 
         const val CHANNEL_ID = "gateway"
         const val NOTIF_ID = 1
@@ -42,7 +42,6 @@ class GatewayService : Service() {
             "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
         val MIRRORS = listOf("https://gh-proxy.com/", "https://ghproxy.net/", "")
 
-        // 兜底 DNS（系统 DNS 读不到时使用）
         private val FALLBACK_DNS = listOf("223.5.5.5", "114.114.114.114", "8.8.8.8")
 
         const val PHASE_DOWNLOAD = "download"
@@ -51,10 +50,16 @@ class GatewayService : Service() {
         const val PHASE_RUNNING = "running"
         const val PHASE_STOPPED = "stopped"
         const val PHASE_FAILED = "failed"
+
+        /** 本地网关端口（给本 app / 其他 app 调 OpenAI 兼容接口） */
+        const val GATEWAY_PORT = 4318
+        const val OPENCODE_PORT = 4317
+        const val DEFAULT_MODEL = "opencode/big-pickle"
     }
 
     private var proc: Process? = null
     private var wakeLock: PowerManager.WakeLock? = null
+    private var gateway: OpenAiGateway? = null
 
     private val lock = Any()
     @Volatile private var busy = false
@@ -70,7 +75,6 @@ class GatewayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                // 已就绪就用"正在启动"，避免误导用户以为在重复下载
                 val alreadyReady = ready(File(filesDir, "rootfs"))
                 val initial = if (alreadyReady) getString(R.string.starting) else getString(R.string.downloading)
                 startForeground(NOTIF_ID, buildNotification(initial, true))
@@ -112,13 +116,21 @@ class GatewayService : Service() {
             .build()
     }
 
-    private fun publish(phase: String, message: String, running: Boolean, url: String? = null, password: String? = null) {
+    private fun publish(
+        phase: String,
+        message: String,
+        running: Boolean,
+        url: String? = null,
+        password: String? = null,
+        gatewayUrl: String? = null,
+    ) {
         getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(message, running))
         sendBroadcast(Intent(ACTION_STATE).apply {
             putExtra(EXTRA_PHASE, phase)
             putExtra(EXTRA_MESSAGE, message)
             if (url != null) putExtra(EXTRA_URL, url)
             if (password != null) putExtra(EXTRA_PASSWORD, password)
+            if (gatewayUrl != null) putExtra(EXTRA_GATEWAY, gatewayUrl)
         })
     }
 
@@ -151,10 +163,6 @@ class GatewayService : Service() {
             File(root, "proot/libexec/loader").exists() &&
             File(root, "proot/lib/libtalloc.so.2").exists()
 
-    /**
-     * 用系统当前网络的 DNS 生成 rootfs/etc/resolv.conf。
-     * 纯 IPv6 蜂窝网络下写死 8.8.8.8 会 getaddrinfo EAI_AGAIN。
-     */
     private fun writeResolvConf(root: File) {
         val servers = LinkedHashSet<String>()
         try {
@@ -162,22 +170,15 @@ class GatewayService : Service() {
             cm?.allNetworks?.forEach { net ->
                 try {
                     cm.getLinkProperties(net)?.dnsServers?.forEach { addr ->
-                        addr.hostAddress?.let {
-                            // 去掉 IPv6 scope
-                            servers.add(it.substringBefore('%'))
-                        }
+                        addr.hostAddress?.let { servers.add(it.substringBefore('%')) }
                     }
                 } catch (_: Exception) {}
             }
         } catch (e: Exception) {
             Log.w("GatewayService", "read system dns failed: ${e.message}")
         }
-        // 系统常给出 IPv6 DNS，但容器内 IPv6 路由未必可用，优先补 IPv4 公共 DNS
         FALLBACK_DNS.forEach { servers.add(it) }
-
-        val content = buildString {
-            servers.take(6).forEach { append("nameserver ").append(it).append('\n') }
-        }
+        val content = buildString { servers.take(6).forEach { append("nameserver ").append(it).append('\n') } }
         try {
             File(root, "etc").mkdirs()
             File(root, "etc/resolv.conf").writeText(content)
@@ -211,41 +212,53 @@ class GatewayService : Service() {
         return best
     }
 
-    private fun remoteSize(url: String): Long {
-        return try {
-            val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                connectTimeout = 8000
-                readTimeout = 8000
-                requestMethod = "HEAD"
-            }
-            val len = conn.contentLengthLong
-            conn.disconnect()
-            len
-        } catch (_: Exception) { -1L }
-    }
+    private fun remoteSize(url: String): Long = try {
+        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 8000
+            requestMethod = "HEAD"
+        }
+        val len = conn.contentLengthLong
+        conn.disconnect()
+        len
+    } catch (_: Exception) { -1L }
 
     private fun startServer(root: File) {
         publish(PHASE_STARTING, getString(R.string.starting), true)
         writeResolvConf(root)
 
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
-        val port = 4317
-
         val prootBin = File(root, "proot/bin/proot").absolutePath
         val prootLib = File(root, "proot/lib").absolutePath
         val prootLoader = File(root, "proot/libexec/loader").absolutePath
 
-        val cmd = listOf(
-            prootBin,
-            "-r", root.absolutePath,
-            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/pts",
-            "--kill-on-exit",
-            "-w", "/workspace",
-            "/opencode/bin/opencode", "serve",
-            "--hostname", "127.0.0.1", "--port", port.toString()
-        )
+        // 用户选的项目目录 → 挂到容器内 /workspace
+        val projectPath = ProjectStore.load(this)?.let { ProjectStore.resolvePath(this, it) }
+        val workspaceInRootfs = File(root, "workspace")
+        val projectExists = projectPath != null && File(projectPath).exists()
+        if (!projectExists) workspaceInRootfs.mkdirs()
+        Log.i("GatewayService", "project=$projectPath mounted=$projectExists")
+
+        val cmd = buildList {
+            add(prootBin)
+            add("-r"); add(root.absolutePath)
+            add("-b"); add("/dev")
+            add("-b"); add("/proc")
+            add("-b"); add("/sys")
+            add("-b"); add("/dev/pts")
+            if (projectExists) {
+                // 真实项目目录覆盖容器内 /workspace
+                add("-b"); add("$projectPath:/workspace")
+            }
+            add("--kill-on-exit")
+            add("-w"); add("/workspace")
+            add("/opencode/bin/opencode"); add("serve")
+            add("--hostname"); add("127.0.0.1")
+            add("--port"); add(OPENCODE_PORT.toString())
+        }
+
         val builder = ProcessBuilder(cmd)
-            .directory(File(root, "workspace").also { it.mkdirs() })
+            .directory(root)
             .redirectErrorStream(true)
         builder.environment().clear()
         mapOf(
@@ -274,13 +287,38 @@ class GatewayService : Service() {
             newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ocgw::gw").apply { acquire(6 * 3600 * 1000L) }
         }
 
-        val url = "http://127.0.0.1:$port"
-        if (waitForReady(url, password)) {
-            publish(PHASE_RUNNING, getString(R.string.running), true, url, password)
-        } else {
+        val url = "http://127.0.0.1:$OPENCODE_PORT"
+        if (!waitForReady(url, password)) {
             publish(PHASE_FAILED, getString(R.string.failed, "server not ready (check opencode.log)"), false)
             stopSelf()
+            return
         }
+
+        // 起本地 OpenAI 兼容网关
+        val token = android.util.Base64.encodeToString(
+            "opencode:$password".toByteArray(), android.util.Base64.NO_WRAP
+        )
+        val gw = OpenAiGateway(
+            listenPort = GATEWAY_PORT,
+            opencodeBase = url,
+            opencodeAuthToken = token,
+            defaultModel = DEFAULT_MODEL,
+            onStatus = { Log.i("GatewayService", "gateway: $it") },
+        )
+        gw.start()
+        gateway = gw
+
+        val gatewayUrl = "http://127.0.0.1:$GATEWAY_PORT/v1"
+        val mountInfo = if (projectExists) projectPath else "容器内 /workspace（未选项目）"
+        publish(
+            PHASE_RUNNING,
+            getString(R.string.running),
+            true,
+            url,
+            password,
+            gatewayUrl,
+        )
+        Log.i("GatewayService", "READY ui=$url gateway=$gatewayUrl workspace=$mountInfo")
     }
 
     private fun waitForReady(url: String, password: String): Boolean {
@@ -390,6 +428,8 @@ class GatewayService : Service() {
     private fun stopGateway() {
         stopping = true
         synchronized(lock) { busy = false }
+        try { gateway?.stop() } catch (_: Exception) {}
+        gateway = null
         try { proc?.destroy() } catch (_: Exception) {}
         proc = null
         try { wakeLock?.release() } catch (_: Exception) {}
@@ -401,6 +441,7 @@ class GatewayService : Service() {
 
     override fun onDestroy() {
         stopping = true
+        try { gateway?.stop() } catch (_: Exception) {}
         try { proc?.destroy() } catch (_: Exception) {}
         try { wakeLock?.release() } catch (_: Exception) {}
         super.onDestroy()
