@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
 # 在原生 arm64 Linux runner 上生成最小 rootfs + proot + opencode，打包 rootfs-arm64.tar.gz
-# 用法: ./build-rootfs.sh
+# 直接用 Ubuntu 官方 ubuntu-base（~28MB 预构建 arm64 glibc rootfs），比 debootstrap 更小更快。
 set -euo pipefail
 
 ARCH="arm64"
 OUT="rootfs-${ARCH}.tar.gz"
 ROOT="rootfs-${ARCH}"
+BASE_URL="https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/ubuntu-base-24.04.3-base-arm64.tar.gz"
 rm -rf "$ROOT"
 mkdir -p "$ROOT"
 
-echo "== 安装 debootstrap =="
-if ! command -v debootstrap >/dev/null 2>&1; then
-  sudo apt-get update
-  sudo apt-get install -y debootstrap
+echo "== 下载并解压 ubuntu-base (arm64 glibc rootfs) =="
+curl -fsSL "$BASE_URL" -o /tmp/ubuntu-base.tar.gz
+# ubuntu-base 解出来顶层是 ./bin ./etc ... 直接解到 ROOT
+tar -xzf /tmp/ubuntu-base.tar.gz -C "$ROOT"
+rm -f /tmp/ubuntu-base.tar.gz
+
+echo "== 准备 chroot 内运行环境（原生 arm64，无需 qemu）=="
+# 挂载点占位（安卓端 proot 会 -b 绑定，这里只保证目录存在）
+mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts"
+# 解决 DNS：用公共 resolver，opencode 客户端联网要用
+if [ ! -f "$ROOT/etc/resolv.conf" ]; then
+  echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
 fi
 
-echo "== debootstrap minbase (arm64, native) =="
-sudo debootstrap --variant=minbase --arch=arm64 bullseye "$ROOT" http://deb.debian.org/debian
-
-echo "== 安装基础工具（chroot 内，原生 arm64）=="
+echo "== 安装基础工具（curl/ca-certificates 等）=="
+# ubuntu-base 极简，需补 curl 才能装 opencode
 sudo chroot "$ROOT" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends \
-  ca-certificates curl wget zstd libc6 coreutils bash tar gzip"
+  ca-certificates curl wget libc6 coreutils bash tar gzip" || {
+    # 某些 ubuntu-base 无 apt 源，手动补 curl + ca-certificates
+    echo "apt 安装失败，尝试直接下载 curl 静态依赖（极少情况）"
+    exit 1
+  }
 
 echo "== 下载 proot 静态二进制（官方 proot-me/proot release）=="
 mkdir -p "$ROOT/proot/bin"
 PROOT_URL="https://github.com/proot-me/proot/releases/download/v5.4.1/proot"
 if ! curl -fsSL "$PROOT_URL" -o "$ROOT/proot/bin/proot"; then
-  # 备用版本
   curl -fsSL "https://github.com/proot-me/proot/releases/download/v5.5.0/proot" -o "$ROOT/proot/bin/proot"
 fi
 chmod +x "$ROOT/proot/bin/proot"
@@ -37,7 +47,7 @@ echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
 sudo chroot "$ROOT" /bin/bash -c "curl -fsSL https://opencode.ai/v2/install | bash"
 
-echo "== 定位 opencode 二进制（全部用 sudo，规避 .opencode 目录权限）=="
+echo "== 定位 opencode 二进制（全部 sudo，规避 .opencode 目录 700 权限）=="
 FOUND=""
 for cand in \
   "$ROOT/root/.opencode/bin/opencode" \
@@ -50,7 +60,6 @@ if [ -z "$FOUND" ]; then
   FOUND=$(sudo find "$ROOT" -type f -name opencode -path '*bin*' 2>/dev/null | head -1 || true)
 fi
 echo "found opencode at: ${FOUND:-<none>}"
-# 关键：判定必须用 sudo test，因为 .opencode 目录是 700
 if [ -z "$FOUND" ] || ! sudo test -f "$FOUND"; then
   echo "opencode 二进制缺失"; exit 1
 fi
@@ -65,7 +74,6 @@ sudo chroot "$ROOT" /bin/bash -c "apt-get clean; rm -rf /var/lib/apt/lists/*" ||
 
 echo "== 体积统计 =="
 sudo du -sh "$ROOT"
-sudo du -sh "$ROOT/usr" || true
 
 echo "== 打包 $OUT =="
 tar -czf "$OUT" -C "$ROOT" .
