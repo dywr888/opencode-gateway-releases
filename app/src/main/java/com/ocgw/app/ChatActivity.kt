@@ -108,16 +108,17 @@ class ChatActivity : ComponentActivity() {
             gravity = if (fromAssistant) Gravity.START else Gravity.END
         }
 
-    private fun makeBubble(text: String, fromAssistant: Boolean): TextView =
-        TextView(this).apply {
-            this.text = text
-            textSize = 15f
-            setTextColor(if (fromAssistant) 0xFF222222.toInt() else 0xFFFFFFFF.toInt())
-            setBackgroundColor(if (fromAssistant) 0xFFF1F3F5.toInt() else 0xFF4A7DFF.toInt())
-            setPadding(dp(12), dp(9), dp(12), dp(9))
-            maxWidth = (resources.displayMetrics.widthPixels * 0.82).toInt()
-            textIsSelectable = true
-        }
+    private fun makeBubble(text: String, fromAssistant: Boolean): TextView {
+        val tv = TextView(this)
+        tv.text = text
+        tv.textSize = 15f
+        tv.setTextColor(if (fromAssistant) 0xFF222222.toInt() else 0xFFFFFFFF.toInt())
+        tv.setBackgroundColor(if (fromAssistant) 0xFFF1F3F5.toInt() else 0xFF4A7DFF.toInt())
+        tv.setPadding(dp(12), dp(9), dp(12), dp(9))
+        tv.maxWidth = (resources.displayMetrics.widthPixels * 0.82).toInt()
+        tv.setTextIsSelectable(true)
+        return tv
+    }
 
     private fun addBubble(text: String, fromAssistant: Boolean) {
         messages.addView(makeBubble(text, fromAssistant), bubbleLayout(fromAssistant))
@@ -134,11 +135,9 @@ class ChatActivity : ComponentActivity() {
         input.setText("")
         addBubble(text, false)
 
-        val thinking = makeBubble("正在思考…", true).apply {
-            setTextColor(0xFF888888.toInt())
-        }
-        val thinkingParams = bubbleLayout(true)
-        messages.addView(thinking, thinkingParams)
+        val thinking = makeBubble("正在思考…", true)
+        thinking.setTextColor(0xFF888888.toInt())
+        messages.addView(thinking, bubbleLayout(true))
         scroll.post { scroll.fullScroll(View.FOCUS_DOWN) }
 
         sendBtn.isEnabled = false
