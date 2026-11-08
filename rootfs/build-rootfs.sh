@@ -30,14 +30,14 @@ if ! curl -fsSL "$PROOT_URL" -o "$ROOT/proot/bin/proot"; then
   curl -fsSL "https://github.com/proot-me/proot/releases/download/v5.5.0/proot" -o "$ROOT/proot/bin/proot"
 fi
 chmod +x "$ROOT/proot/bin/proot"
-ls -l "$ROOT/proot/bin/proot" || { echo "proot 二进制缺失"; exit 1; }
+sudo test -f "$ROOT/proot/bin/proot" || { echo "proot 二进制缺失"; exit 1; }
+sudo du -h "$ROOT/proot/bin/proot"
 
 echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
 sudo chroot "$ROOT" /bin/bash -c "curl -fsSL https://opencode.ai/v2/install | bash"
 
 echo "== 定位 opencode 二进制（全部用 sudo，规避 .opencode 目录权限）=="
-# install 脚本默认落在 /root/.opencode/bin/opencode（chroot 内 HOME=/root）
 FOUND=""
 for cand in \
   "$ROOT/root/.opencode/bin/opencode" \
@@ -50,18 +50,23 @@ if [ -z "$FOUND" ]; then
   FOUND=$(sudo find "$ROOT" -type f -name opencode -path '*bin*' 2>/dev/null | head -1 || true)
 fi
 echo "found opencode at: ${FOUND:-<none>}"
-if [ -z "$FOUND" ] || [ ! -f "$FOUND" ]; then
+# 关键：判定必须用 sudo test，因为 .opencode 目录是 700
+if [ -z "$FOUND" ] || ! sudo test -f "$FOUND"; then
   echo "opencode 二进制缺失"; exit 1
 fi
 sudo cp "$FOUND" "$ROOT/opencode/bin/opencode"
 sudo chmod +x "$ROOT/opencode/bin/opencode"
 sudo test -f "$ROOT/opencode/bin/opencode" || { echo "拷贝后仍缺失"; exit 1; }
 sudo ls -l "$ROOT/opencode/bin/opencode"
+sudo du -h "$ROOT/opencode/bin/opencode"
 
 echo "== 清理 =="
 sudo chroot "$ROOT" /bin/bash -c "apt-get clean; rm -rf /var/lib/apt/lists/*" || true
 
+echo "== 体积统计 =="
+sudo du -sh "$ROOT"
+sudo du -sh "$ROOT/usr" || true
+
 echo "== 打包 $OUT =="
-# 顶层条目为 ./proot ./opencode ./usr ... 解压到目标目录即可
 tar -czf "$OUT" -C "$ROOT" .
 echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
