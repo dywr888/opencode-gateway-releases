@@ -7,6 +7,7 @@ on:
       - 'settings.gradle'
       - 'gradle.properties'
       - '.github/workflows/build-apk.yml'
+      - 'release.keystore'
 
 permissions:
   contents: write
@@ -26,47 +27,32 @@ jobs:
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           ls /usr/local/lib/android/sdk/platforms || true
-      - name: Get or create keystore
-        id: keystore
+      - name: Restore or create keystore
         run: |
-          if [ -n "${{ secrets.KEYSTORE_B64 }}" ]; then
-            echo "Using keystore from secret"
+          if [ -f release.keystore ]; then
+            echo "Using keystore from repo"
+          elif [ -n "${{ secrets.KEYSTORE_B64 }}" ]; then
             echo "${{ secrets.KEYSTORE_B64 }}" | base64 -d > release.keystore
-            echo "keystore=release.keystore" >> "$GITHUB_OUTPUT"
-            echo "keystore_password=${{ secrets.KEYSTORE_PASSWORD }}" >> "$GITHUB_OUTPUT"
-            echo "key_alias=${{ secrets.KEY_ALIAS }}" >> "$GITHUB_OUTPUT"
-            echo "key_password=${{ secrets.KEY_PASSWORD }}" >> "$GITHUB_OUTPUT"
+            echo "Using keystore from secret"
           else
-            echo "No keystore secret found, generating new one..."
+            echo "Creating new keystore (first time)"
             keytool -genkeypair -v -keystore release.keystore -keyalg RSA -keysize 2048 \
               -validity 10000 -alias ocgw -dname "CN=OCGW" \
               -storepass android -keypass android
-            # 输出 base64 供手动添加到 Secrets
-            base64 -w 0 release.keystore
-            echo "::error::No keystore secret found. Copy the base64 above and add as KEYSTORE_B64 secret. Also add KEYSTORE_PASSWORD=android, KEY_ALIAS=ocgw, KEY_PASSWORD=android"
-            exit 1
           fi
       - name: Get version info
         id: version
         run: |
           VERSION="1.0.0"
-          DATE=$(date -u +%Y%m%d)
-          SHA=$(git rev-parse --short HEAD)
           TAG="v${VERSION}-$(date -u +%Y%m%d)-$(git rev-parse --short HEAD)"
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Build release APK
-        env:
-          KEYSTORE: ${{ github.workspace }}/release.keystore
-          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
           gradle assembleRelease \
             -Pandroid.injected.signing.store.file="${{ github.workspace }}/release.keystore" \
-            -Pandroid.injected.signing.store.password="${KEYSTORE_PASSWORD}" \
-            -Pandroid.injected.signing.key.alias="${KEY_ALIAS}" \
-            -Pandroid.injected.signing.key.password="${KEY_PASSWORD}"
+            -Pandroid.injected.signing.store.password="android" \
+            -Pandroid.injected.signing.key.alias="ocgw" \
+            -Pandroid.injected.signing.key.password="android"
       - name: Upload APK
         uses: softprops/action-gh-release@v2
         with:
@@ -74,14 +60,12 @@ jobs:
           name: "OpenCode Gateway ${{ steps.version.outputs.tag }}"
           body: |
             **OpenCode Gateway** for Android
-            - Version: ${{ steps.version.outputs.version }}
             - Build: ${{ steps.version.outputs.tag }}
-            - Date: $(date -u)
             - Commit: ${{ github.sha }}
             - **APK 镜像下载**：https://gh-proxy.com/https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/app-arm64-v8a-release.apk
-            - Mirror: https://ghproxy.net/https://github.com/${{ github.repository }}/releases/download/${{ steps.version.outputs.tag }}/app-arm64-v8a-release.apk
-            - Gateway port: 4318
-            - OpenCode port: 4317
-          files: app/build/outputs/apk/release/*.apk
+            - 网关: 127.0.0.1:4318/v1
+          files: |
+            app/build/outputs/apk/release/*.apk
+            release.keystore
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
