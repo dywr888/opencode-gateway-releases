@@ -16,22 +16,21 @@ if ! command -v debootstrap >/dev/null 2>&1; then
 fi
 
 echo "== debootstrap minbase (arm64, native) =="
-# runner 本身是 arm64，直接原生 bootstrap，无需 qemu
 sudo debootstrap --variant=minbase --arch=arm64 bullseye "$ROOT" http://deb.debian.org/debian
 
 echo "== 安装基础工具（chroot 内，原生 arm64）=="
 sudo chroot "$ROOT" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates curl wget zstd libc6 coreutils bash tar gzip"
 
-echo "== 下载 proot 静态二进制 =="
+echo "== 下载 proot 静态二进制（官方 proot-me/proot release）=="
 mkdir -p "$ROOT/proot/bin"
-PROOT_BIN="https://github.com/proot-me/proot-static/releases/download/2022.12.22/proot-2022.12.22-aarch64-static"
-if ! curl -fsSL "$PROOT_BIN" -o "$ROOT/proot/bin/proot"; then
-  # 备用：proot.me 源码构建需工具链，这里仅提示
-  echo "proot 静态下载失败，请检查网络/链接" >&2
-  exit 1
+PROOT_URL="https://github.com/proot-me/proot/releases/download/v5.4.1/proot"
+if ! curl -fsSL "$PROOT_URL" -o "$ROOT/proot/bin/proot"; then
+  # 备用版本
+  curl -fsSL "https://github.com/proot-me/proot/releases/download/v5.5.0/proot" -o "$ROOT/proot/bin/proot"
 fi
 chmod +x "$ROOT/proot/bin/proot"
+ls -l "$ROOT/proot/bin/proot" || { echo "proot 二进制缺失"; exit 1; }
 
 echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
