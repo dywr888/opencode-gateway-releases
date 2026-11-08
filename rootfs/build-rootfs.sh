@@ -32,35 +32,6 @@ if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
   cp -f /etc/ssl/certs/ca-certificates.crt "$ROOT/etc/ssl/certs/ca-certificates.crt"
 fi
 
-echo "== 2.5) git（opencode 的 VCS/快照功能依赖 git）=="
-if [ "$(id -u)" = "0" ]; then
-  mount --bind /dev "$ROOT/dev"
-  mount -t proc proc "$ROOT/proc"
-  mount -t sysfs sys "$ROOT/sys"
-  cleanup_mounts() {
-    umount "$ROOT/sys" 2>/dev/null || true
-    umount "$ROOT/proc" 2>/dev/null || true
-    umount "$ROOT/dev" 2>/dev/null || true
-  }
-  trap cleanup_mounts EXIT
-  chroot "$ROOT" /usr/bin/env DEBIAN_FRONTEND=noninteractive \
-    /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends git ca-certificates && apt-get clean && rm -rf /var/lib/apt/lists/*"
-  chroot "$ROOT" git --version
-  cleanup_mounts
-  trap - EXIT
-else
-  echo "!! 非 root，无法 chroot 安装 git（CI 请用 sudo 运行本脚本）"
-fi
-cat > "$ROOT/etc/gitconfig" <<'EOF'
-[user]
-	name = opencode
-	email = opencode@localhost
-[init]
-	defaultBranch = main
-[safe]
-	directory = *
-EOF
-
 echo "== 3) opencode 二进制 =="
 mkdir -p "$ROOT/opencode/bin" /tmp/ocpkg
 curl -fsSL "$OC_TGZ" -o /tmp/oc.tgz
@@ -126,13 +97,16 @@ cp -f "$TL" "$ROOT/proot/lib/libtalloc.so.2"
 cp -f "$SH" "$ROOT/proot/lib/libandroid-shmem.so"
 ls -l "$ROOT/proot/bin/proot" "$ROOT/proot/libexec/loader" "$ROOT/proot/lib/"
 
-echo "== 5) 体积统计 =="
+echo "== 5) 清理：移除 rootfs 中残留的 .git（防止 VCS 误判）=="
+find "$ROOT" -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+
+echo "== 6) 体积统计 =="
 du -sh "$ROOT"
 
-echo "== 6) 打包 $OUT =="
+echo "== 7) 打包 $OUT =="
 tar -czf "$OUT" -C "$ROOT" --hard-dereference .
 echo "wrote $OUT ($(du -h "$OUT" | cut -f1))"
 
-echo "== 7) 校验：不应再有硬链接条目 =="
+echo "== 8) 校验：不应再有硬链接条目 =="
 HL=$(tar -tvf "$OUT" 2>/dev/null | awk '$1 ~ /^h/' | wc -l)
 echo "hardlink entries remaining: $HL"
