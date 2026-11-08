@@ -17,9 +17,10 @@ import java.net.URL
 /**
  * 前台服务：拉起 opencode serve（在 proot + rootfs 内），广播监听地址与密码给 UI。
  *
- * - onStartCommand 立刻 startForeground()，避免 ForegroundServiceDidNotStartInTimeException
- * - 下载/解压/启动全在后台线程
+ * - startForeground 立刻调用，避免 ForegroundServiceDidNotStartInTimeException
+ * - 下载/解压/启动全在后台线程；用 running 守卫防止并发重复启动
  * - 运行环境默认走镜像（先测速选最快的）
+ * - tar 解压用 --hard-dereference，绕开 Android untrusted_app 对 link() 的限制
  */
 class GatewayService : Service() {
     companion object {
@@ -34,10 +35,8 @@ class GatewayService : Service() {
         const val CHANNEL_ID = "gateway"
         const val NOTIF_ID = 1
 
-        // 原始 Release 地址（github.com 在国内常被墙，故默认走镜像）
         const val ORIGINAL =
             "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
-        // 镜像前缀（拼接原始完整 URL）。空串 = 直连，作兜底。
         val MIRRORS = listOf(
             "https://gh-proxy.com/",
             "https://ghproxy.net/",
@@ -56,6 +55,7 @@ class GatewayService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     @Volatile private var worker: Thread? = null
     @Volatile private var stopping = false
+    @Volatile private var running = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -68,7 +68,11 @@ class GatewayService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 startForeground(NOTIF_ID, buildNotification(getString(R.string.downloading), true))
-                startGatewayAsync()
+                if (running || worker?.isAlive == true) {
+                    Log.i("GatewayService", "already running; ignore duplicate START")
+                } else {
+                    startGatewayAsync()
+                }
             }
             ACTION_STOP -> stopGateway()
         }
@@ -109,6 +113,7 @@ class GatewayService : Service() {
 
     private fun startGatewayAsync() {
         stopping = false
+        running = true
         worker = Thread {
             try {
                 val root = File(filesDir, "rootfs")
@@ -126,7 +131,6 @@ class GatewayService : Service() {
         }.also { it.start() }
     }
 
-    /** 对每个镜像发小 Range 请求测速，返回最快可用的完整下载 URL */
     private fun pickFastestMirror(): String {
         var best = ORIGINAL
         var bestMs = Long.MAX_VALUE
@@ -142,13 +146,13 @@ class GatewayService : Service() {
                 val code = conn.responseCode
                 val ms = System.currentTimeMillis() - t0
                 conn.disconnect()
-                Log.i("GatewayService", "mirror $prefix -> $code in ${ms}ms")
+                Log.i("GatewayService", "mirror '$prefix' -> $code in ${ms}ms")
                 if ((code == 200 || code == 206) && ms < bestMs) {
                     bestMs = ms
                     best = url
                 }
             } catch (e: Exception) {
-                Log.w("GatewayService", "mirror $prefix failed: ${e.message}")
+                Log.w("GatewayService", "mirror '$prefix' failed: ${e.message}")
             }
         }
         return best
@@ -197,8 +201,10 @@ class GatewayService : Service() {
 
         val url = "http://127.0.0.1:$port"
         if (waitForReady(url, password)) {
+            running = true
             publish(PHASE_RUNNING, getString(R.string.running), true, url, password)
         } else {
+            running = false
             publish(PHASE_FAILED, getString(R.string.failed, "server not ready"), false)
             stopSelf()
         }
@@ -274,8 +280,14 @@ class GatewayService : Service() {
 
         if (stopping) return
         publish(PHASE_EXTRACT, getString(R.string.extracting), true)
+        // 先清空目标目录，避免残留/并发导致冲突
+        dest.deleteRecursively()
         dest.mkdirs()
-        val p = ProcessBuilder("sh", "-c", "cd '${dest.absolutePath}' && tar -xzf '${tmp.absolutePath}'").start()
+        // --hard-dereference: 把硬链接解成独立文件，绕开 untrusted_app 对 link() 的限制
+        val p = ProcessBuilder(
+            "sh", "-c",
+            "cd '${dest.absolutePath}' && tar -xzf '${tmp.absolutePath}' --hard-dereference --no-same-owner"
+        ).start()
         val rc = p.waitFor()
         if (rc != 0) throw RuntimeException("extract failed: ${p.errorStream.bufferedReader().readText()}")
         tmp.delete()
@@ -283,6 +295,7 @@ class GatewayService : Service() {
 
     private fun stopGateway() {
         stopping = true
+        running = false
         try { proc?.destroy() } catch (_: Exception) {}
         proc = null
         try { wakeLock?.release() } catch (_: Exception) {}
