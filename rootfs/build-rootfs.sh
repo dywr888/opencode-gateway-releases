@@ -34,6 +34,7 @@ ls -l "$ROOT/proot/bin/proot" || { echo "proot 二进制缺失"; exit 1; }
 
 echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
+# opencode install 默认装到 $HOME/.opencode/bin/opencode（chroot 内 HOME=/root）
 sudo chroot "$ROOT" /bin/bash -c "curl -fsSL https://opencode.ai/v2/install | bash"
 if [ -f "$ROOT/root/.opencode/bin/opencode" ]; then
   sudo cp "$ROOT/root/.opencode/bin/opencode" "$ROOT/opencode/bin/opencode"
