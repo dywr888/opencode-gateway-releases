@@ -315,6 +315,7 @@ class GatewayService : Service() {
     } catch (_: Exception) { -1L }
 
     private fun startServer(root: File) {
+        if (stopping) return
         publish(PHASE_STARTING, "正在启动…", true, progress = 0)
         writeResolvConf(root)
 
@@ -373,6 +374,11 @@ class GatewayService : Service() {
 
         val p = builder.start()
         proc = p
+        if (stopping) {
+            // 启动过程中用户点了停止：立刻回收
+            killProcessTree()
+            return
+        }
         val logFile = File(cacheDir, "opencode.log")
         Thread {
             try {
@@ -389,10 +395,12 @@ class GatewayService : Service() {
 
         val url = "http://127.0.0.1:$OPENCODE_PORT"
         if (!waitForReady(url, password)) {
+            if (stopping) return
             publish(PHASE_FAILED, "服务启动失败，请查看日志", false, progress = -1)
             stopSelf()
             return
         }
+        if (stopping) return
 
         // 2) 起本地 OpenAI 兼容网关
         val token = android.util.Base64.encodeToString(
@@ -407,6 +415,11 @@ class GatewayService : Service() {
         )
         gw.start()
         gateway = gw
+        if (stopping) {
+            try { gw.stop() } catch (_: Exception) {}
+            gateway = null
+            return
+        }
 
         val gatewayUrl = "http://127.0.0.1:$GATEWAY_PORT/v1"
         publish(PHASE_RUNNING, "已就绪", true, url, password, gatewayUrl, progress = 100)
