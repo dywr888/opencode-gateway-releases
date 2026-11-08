@@ -7,8 +7,6 @@ import android.content.IntentFilter
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.webkit.WebView
-import android.webkit.WebViewClient
 import android.widget.Button
 import android.widget.ProgressBar
 import android.widget.TextView
@@ -17,6 +15,13 @@ import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 
+/**
+ * 主页：极简三步
+ *  1) 选项目目录（可选）
+ *  2) 启动
+ *  3) 自动进入聊天界面
+ * 「Web UI」和「网关地址」收进高级区，默认不打扰用户。
+ */
 class MainActivity : ComponentActivity() {
 
     private lateinit var status: TextView
@@ -31,8 +36,6 @@ class MainActivity : ComponentActivity() {
     private var uiUrl: String? = null
     private var uiPassword: String? = null
     private var gatewayUrl: String? = null
-    private var webView: WebView? = null
-    private var showingWeb = false
 
     private val pickDir = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -45,7 +48,7 @@ class MainActivity : ComponentActivity() {
         } catch (_: Exception) {}
         ProjectStore.save(this, uri)
         refreshProjectLabel()
-        Toast.makeText(this, "已选择目录，重启网关后生效", Toast.LENGTH_LONG).show()
+        Toast.makeText(this, "已选择目录，下次启动生效", Toast.LENGTH_SHORT).show()
     }
 
     private val receiver = object : BroadcastReceiver() {
@@ -62,19 +65,14 @@ class MainActivity : ComponentActivity() {
                     }
                     GatewayService.PHASE_RUNNING -> {
                         progress.visibility = ProgressBar.GONE
-                        status.text = getString(R.string.running)
+                        status.text = "已就绪"
                         uiUrl = intent.getStringExtra(GatewayService.EXTRA_URL)
                         uiPassword = intent.getStringExtra(GatewayService.EXTRA_PASSWORD)
                         gatewayUrl = intent.getStringExtra(GatewayService.EXTRA_GATEWAY)
                         setRunning(true)
-                        gatewayInfo.text = buildString {
-                            append("OpenAI 兼容网关（可直接给其他 app 用）\n")
-                            append(gatewayUrl ?: "")
-                            append("\n模型示例：").append(GatewayService.DEFAULT_MODEL)
-                            append("\n\nPOST ").append(gatewayUrl ?: "").append("/chat/completions")
-                        }
-                        // 每次进入 RUNNING 都自动打开 Web UI（修复之前只开一次的问题）
-                        openWebView()
+                        gatewayInfo.text = gatewayUrl ?: ""
+                        // 自动进入聊天；Web UI 保留为高级入口
+                        launchChat()
                     }
                     GatewayService.PHASE_STOPPED -> {
                         progress.visibility = ProgressBar.GONE
@@ -101,6 +99,7 @@ class MainActivity : ComponentActivity() {
         openBtn.isEnabled = running
         stopBtn.isEnabled = running
         pickBtn.isEnabled = !running
+        startBtn.text = if (running) "运行中" else "启动"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -122,8 +121,23 @@ class MainActivity : ComponentActivity() {
 
         startBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_START) }
         stopBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_STOP) }
-        openBtn.setOnClickListener { openWebView() }
+        openBtn.setOnClickListener {
+            val gw = gatewayUrl ?: return@setOnClickListener
+            launchChat()
+        }
         pickBtn.setOnClickListener { pickDir.launch(null) }
+    }
+
+    private fun launchChat() {
+        val gw = gatewayUrl
+        if (gw == null) {
+            Toast.makeText(this, "还没就绪", Toast.LENGTH_SHORT).show()
+            return
+        }
+        startActivity(Intent(this, ChatActivity::class.java).apply {
+            putExtra(ChatActivity.EXTRA_GATEWAY, gw)
+            putExtra(ChatActivity.EXTRA_MODEL, GatewayService.DEFAULT_MODEL)
+        })
     }
 
     private fun refreshProjectLabel() {
@@ -133,71 +147,11 @@ class MainActivity : ComponentActivity() {
             return
         }
         val path = ProjectStore.resolvePath(this, uri)
-        projectPath.text = path ?: "已选择（无法解析为文件路径，可能不支持）"
+        projectPath.text = path ?: "已选择（无法解析路径）"
     }
 
     private fun startServiceCompat(action: String) {
         val intent = Intent(this, GatewayService::class.java).apply { this.action = action }
         ContextCompat.startForegroundService(this, intent)
-    }
-
-    private fun openWebView() {
-        val url = uiUrl ?: return
-        val password = uiPassword ?: return
-        val wv = webView ?: WebView(this).apply {
-            settings.domStorageEnabled = true
-            settings.javaScriptEnabled = true
-            settings.databaseEnabled = true
-            webViewClient = WebViewClient()
-        }.also { webView = it }
-
-        val token = android.util.Base64.encodeToString("opencode:$password".toByteArray(), android.util.Base64.NO_WRAP)
-        wv.loadUrl("$url/?auth_token=$token")
-        if (!showingWeb) {
-            setContentView(wv)
-            showingWeb = true
-        } else {
-            setContentView(wv)
-        }
-    }
-
-    override fun onStart() {
-        super.onStart()
-        val filter = IntentFilter(GatewayService.ACTION_STATE)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(receiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            registerReceiver(receiver, filter)
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        try { unregisterReceiver(receiver) } catch (_: Exception) {}
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onBackPressed() {
-        if (showingWeb && webView?.canGoBack() == true) {
-            webView?.goBack()
-        } else if (showingWeb) {
-            // 从 WebView 退回控制页
-            showingWeb = false
-            setContentView(R.layout.activity_main)
-            status = findViewById(R.id.status)
-            progress = findViewById(R.id.progress)
-            startBtn = findViewById(R.id.startBtn)
-            openBtn = findViewById(R.id.openBtn)
-            stopBtn = findViewById(R.id.stopBtn)
-            pickBtn = findViewById(R.id.pickBtn)
-            projectPath = findViewById(R.id.projectPath)
-            gatewayInfo = findViewById(R.id.gatewayInfo)
-            status.text = getString(R.string.running)
-            setRunning(true)
-            refreshProjectLabel()
-        } else {
-            @Suppress("DEPRECATION")
-            super.onBackPressed()
-        }
     }
 }
