@@ -111,7 +111,7 @@ object ProjectStore {
                     if (name.startsWith(".")) continue
                     val child = dir.findFile(name)
                     if (file.isDirectory) {
-                        val childDir = child?.let { it as DocumentFile } ?: dir.createDirectory(name)
+                        val childDir: DocumentFile = child ?: dir.createDirectory(name) ?: return
                         walk(childDir, file)
                     } else {
                         // 仅同步指定文件列表，或全部（增量）
@@ -122,8 +122,8 @@ object ProjectStore {
                                 context.contentResolver.openOutputStream(child.uri, "wt")
                             } else {
                                 // 新文件
-                                dir.createFile(file.name.split('.').lastOrNull()?.let { "application/octet-stream" } ?: "application/octet-stream", name)
-                                    ?.let { context.contentResolver.openOutputStream(it.uri, "wt") }
+                                val mime = file.name.split('.').lastOrNull()?.let { "application/octet-stream" } ?: "application/octet-stream"
+                                dir.createFile(mime, name)?.let { context.contentResolver.openOutputStream(it.uri, "wt") }
                             } ?: continue
                             file.inputStream().use { input ->
                                 output.use { output ->
@@ -139,10 +139,10 @@ object ProjectStore {
             }
             walk(root, src)
             Log.i(TAG, "synced back $count files from workspace")
-            count
+            return count
         } catch (e: Exception) {
             Log.e(TAG, "syncFromWorkspace failed", e)
-            -1
+            return -1
         }
     }
 }
