@@ -17,7 +17,11 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * 本地 OpenAI 兼容网关。
  *
- * 对外：POST http://127.0.0.1:<port>/v1/chat/completions  以及 GET /v1/models
+ * 对外：
+ *   POST http://127.0.0.1:<port>/v1/chat/completions   (支持 stream=true 的 SSE)
+ *   GET  http://127.0.0.1:<port>/v1/models
+ *   GET  http://127.0.0.1:<port>/health
+ *
  * 对内：转发到 opencode serve 的 session 路径
  *   - POST /api/session            建会话
  *   - POST /api/session/:id/prompt 发消息
@@ -35,7 +39,7 @@ class OpenAiGateway(
 ) {
     private var server: ServerSocket? = null
     private val running = AtomicBoolean(false)
-    private val pool = Executors.newFixedThreadPool(8)
+    private val pool = Executors.newFixedThreadPool(16)
 
     companion object {
         private const val TAG = "OpenAiGateway"
@@ -72,25 +76,26 @@ class OpenAiGateway(
 
     private fun handle(sock: Socket) {
         try {
-            sock.soTimeout = 120_000
+            sock.soTimeout = 300_000
             val input = BufferedInputStream(sock.getInputStream())
             val out = sock.getOutputStream()
 
-            val (method, path, headers, body) = readRequest(input)
-            Log.i(TAG, "$method $path")
+            val req = readRequest(input)
+            Log.i(TAG, "${req.method} ${req.path}")
 
             when {
-                method == "OPTIONS" -> writeResponse(out, 204, "{}")
-                method == "GET" && path.startsWith("/v1/models") -> writeResponse(out, 200, modelsJson())
-                method == "GET" && (path == "/" || path.startsWith("/health")) ->
-                    writeResponse(out, 200, """{"ok":true,"service":"ocgw","opencode":"$opencodeBase"}""")
-                method == "POST" && path.startsWith("/v1/chat/completions") ->
-                    writeResponse(out, 200, chatCompletions(body))
-                else -> writeResponse(out, 404, errorJson("not found: $method $path"))
+                req.method == "OPTIONS" -> writeJson(out, 204, "{}")
+                req.method == "GET" && req.path.startsWith("/v1/models") ->
+                    writeJson(out, 200, modelsJson())
+                req.method == "GET" && (req.path == "/" || req.path.startsWith("/health")) ->
+                    writeJson(out, 200, """{"ok":true,"service":"ocgw","opencode":"$opencodeBase"}""")
+                req.method == "POST" && req.path.startsWith("/v1/chat/completions") ->
+                    handleChat(out, req.body)
+                else -> writeJson(out, 404, errorJson("not found: ${req.method} ${req.path}"))
             }
         } catch (e: Exception) {
             Log.e(TAG, "handle error", e)
-            try { writeResponse(sock.getOutputStream(), 500, errorJson(e.message ?: "error")) } catch (_: Exception) {}
+            try { writeJson(sock.getOutputStream(), 500, errorJson(e.message ?: "error")) } catch (_: Exception) {}
         } finally {
             try { sock.close() } catch (_: Exception) {}
         }
@@ -139,7 +144,7 @@ class OpenAiGateway(
         return Req(method, path, headers, body)
     }
 
-    private fun writeResponse(out: OutputStream, code: Int, json: String) {
+    private fun writeJson(out: OutputStream, code: Int, json: String) {
         val bytes = json.toByteArray(Charsets.UTF_8)
         val head = buildString {
             append("HTTP/1.1 ").append(code).append(" ").append(statusText(code)).append("\r\n")
@@ -175,10 +180,9 @@ class OpenAiGateway(
         return JSONObject().put("object", "list").put("data", arr).toString()
     }
 
-    /** 从 opencode 拿可用模型，失败则返回内置列表 */
     private fun listModels(): List<String> {
         val fallback = listOf(
-            "$defaultModel",
+            defaultModel,
             "opencode/big-pickle",
             "opencode/deepseek-v4.1-flash-free",
             "opencode/glm-5.3-flash-free",
@@ -205,24 +209,99 @@ class OpenAiGateway(
         }
     }
 
-    // ---------------- 转发到 opencode session ----------------
+    // ---------------- 聊天处理（支持流式） ----------------
 
-    private fun chatCompletions(body: String): String {
+    private fun handleChat(out: OutputStream, body: String) {
         val req = JSONObject(body)
         val modelStr = req.optString("model", defaultModel)
         val (providerID, modelID) = splitModel(modelStr)
         val prompt = buildPrompt(req.optJSONArray("messages"))
-        if (prompt.isBlank()) return errorJson("messages is empty")
+        val stream = req.optBoolean("stream", false)
 
-        return try {
+        if (prompt.isBlank()) {
+            writeJson(out, 400, errorJson("messages is empty"))
+            return
+        }
+
+        try {
             val sessionID = createSession(providerID, modelID)
             sendPrompt(sessionID, providerID, modelID, prompt)
-            val text = awaitAssistantText(sessionID)
-            completionJson(modelStr, text)
+
+            if (stream) {
+                streamChat(out, sessionID, modelStr)
+            } else {
+                val text = awaitAssistantText(sessionID)
+                writeJson(out, 200, completionJson(modelStr, text))
+            }
         } catch (e: Exception) {
-            Log.e(TAG, "chatCompletions failed", e)
-            errorJson(e.message ?: "upstream error")
+            Log.e(TAG, "chat failed", e)
+            writeJson(out, 500, errorJson(e.message ?: "upstream error"))
         }
+    }
+
+    /** SSE 流式：边轮询边输出 */
+    private fun streamChat(out: OutputStream, sessionID: String, modelStr: String) {
+        val id = "chatcmpl-" + UUID.randomUUID().toString().replace("-", "").take(24)
+        val head = buildString {
+            append("HTTP/1.1 200 OK\r\n")
+            append("Content-Type: text/event-stream; charset=utf-8\r\n")
+            append("Cache-Control: no-cache\r\n")
+            append("Connection: close\r\n")
+            append("Access-Control-Allow-Origin: *\r\n\r\n")
+        }
+        out.write(head.toByteArray(Charsets.UTF_8))
+        out.flush()
+
+        var sentLen = 0
+        var finished = false
+        val deadline = System.currentTimeMillis() + 180_000
+
+        while (!finished && System.currentTimeMillis() < deadline) {
+            val text = try {
+                pollAssistantText(sessionID)
+            } catch (e: Exception) {
+                Log.w(TAG, "stream poll failed: ${e.message}")
+                ""
+            }
+            if (text != null) {
+                if (text.length > sentLen) {
+                    val delta = text.substring(sentLen)
+                    sentLen = text.length
+                    val chunk = JSONObject().apply {
+                        put("id", id)
+                        put("object", "chat.completion.chunk")
+                        put("created", System.currentTimeMillis() / 1000)
+                        put("model", modelStr)
+                        put("choices", JSONArray().put(JSONObject().apply {
+                            put("index", 0)
+                            put("delta", JSONObject().apply { put("content", delta) })
+                            put("finish_reason", null)
+                        }))
+                    }
+                    out.write(("data: " + chunk.toString() + "\n\n").toByteArray(Charsets.UTF_8))
+                    out.flush()
+                }
+                // 判断完成
+                finished = isAssistantFinished(sessionID)
+            }
+            if (!finished) Thread.sleep(800)
+        }
+
+        // 结束标记
+        val done = JSONObject().apply {
+            put("id", id)
+            put("object", "chat.completion.chunk")
+            put("created", System.currentTimeMillis() / 1000)
+            put("model", modelStr)
+            put("choices", JSONArray().put(JSONObject().apply {
+                put("index", 0)
+                put("delta", JSONObject())
+                put("finish_reason", "stop")
+            }))
+        }
+        out.write(("data: " + done.toString() + "\n\n").toByteArray(Charsets.UTF_8))
+        out.write("data: [DONE]\n\n".toByteArray(Charsets.UTF_8))
+        out.flush()
     }
 
     private fun splitModel(model: String): Pair<String, String> {
@@ -231,7 +310,6 @@ class OpenAiGateway(
         else "opencode" to model
     }
 
-    /** 把 OpenAI messages 拼成单个 prompt（opencode prompt 接口只收 text） */
     private fun buildPrompt(messages: JSONArray?): String {
         if (messages == null) return ""
         val sb = StringBuilder()
@@ -269,10 +347,8 @@ class OpenAiGateway(
         conn.outputStream.use { it.write("{}".toByteArray()) }
         val text = conn.inputStream.bufferedReader().readText()
         conn.disconnect()
-        val data = JSONObject(text).optJSONObject("data") ?: throw RuntimeException("create session failed: $text")
-        val id = data.optString("id")
-        if (id.isEmpty()) throw RuntimeException("no session id: $text")
-        return id
+        val data = JSONObject(text).optJSONObject("data") ?: throw RuntimeException("create session failed")
+        return data.optString("id").ifEmpty { throw RuntimeException("no session id") }
     }
 
     private fun sendPrompt(sessionID: String, providerID: String, modelID: String, text: String) {
@@ -297,48 +373,63 @@ class OpenAiGateway(
         if (code !in 200..299) throw RuntimeException("prompt failed($code): $resp")
     }
 
-    /** 轮询会话消息，直到出现已完成的 assistant 文本 */
+    /** 返回 assistant 文本（未完成返回 null 表示还在生成） */
+    private fun pollAssistantText(sessionID: String): String? {
+        return try {
+            val data = fetchMessages(sessionID)
+            for (i in 0 until data.length()) {
+                val m = data.getJSONObject(i)
+                if (m.optString("type") != "assistant") continue
+                val content = m.optJSONArray("content") ?: continue
+                val sb = StringBuilder()
+                for (j in 0 until content.length()) {
+                    val part = content.optJSONObject(j) ?: continue
+                    if (part.optString("type") == "text") sb.append(part.optString("text"))
+                }
+                if (sb.isNotEmpty()) return sb.toString()
+            }
+            null
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    private fun isAssistantFinished(sessionID: String): Boolean {
+        return try {
+            val data = fetchMessages(sessionID)
+            for (i in 0 until data.length()) {
+                val m = data.getJSONObject(i)
+                if (m.optString("type") == "assistant" && m.has("finish") && !m.isNull("finish")) {
+                    return true
+                }
+            }
+            false
+        } catch (e: Exception) {
+            false
+        }
+    }
+
+    private fun fetchMessages(sessionID: String): JSONArray {
+        val conn = (URL("$opencodeBase/api/session/$sessionID/message?auth_token=$opencodeAuthToken").openConnection() as HttpURLConnection).apply {
+            connectTimeout = 8000
+            readTimeout = 15000
+        }
+        val text = conn.inputStream.bufferedReader().readText()
+        conn.disconnect()
+        return JSONObject(text).optJSONArray("data") ?: JSONArray()
+    }
+
+    /** 非流式：轮询直到 assistant 完成 */
     private fun awaitAssistantText(sessionID: String): String {
         val deadline = System.currentTimeMillis() + 180_000
-        var lastError: String? = null
         while (System.currentTimeMillis() < deadline) {
-            try {
-                val conn = (URL("$opencodeBase/api/session/$sessionID/message?auth_token=$opencodeAuthToken").openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 8000
-                    readTimeout = 15000
-                }
-                val text = conn.inputStream.bufferedReader().readText()
-                conn.disconnect()
-                val data = JSONObject(text).optJSONArray("data") ?: continue
-                for (i in 0 until data.length()) {
-                    val m = data.getJSONObject(i)
-                    if (m.optString("type") != "assistant") continue
-                    // 有 retry.error 说明上游失败
-                    val retry = m.optJSONObject("retry")
-                    if (retry != null) {
-                        val err = retry.optJSONObject("error")
-                        if (err != null) lastError = err.optString("message")
-                    }
-                    val content = m.optJSONArray("content") ?: continue
-                    val sb = StringBuilder()
-                    for (j in 0 until content.length()) {
-                        val part = content.optJSONObject(j) ?: continue
-                        if (part.optString("type") == "text") sb.append(part.optString("text"))
-                    }
-                    val finished = m.has("finish") && !m.isNull("finish")
-                    if (finished && sb.isNotEmpty()) return sb.toString()
-                    if (finished && sb.isEmpty() && lastError != null) {
-                        throw RuntimeException(lastError ?: "upstream error")
-                    }
-                }
-            } catch (e: RuntimeException) {
-                throw e
-            } catch (e: Exception) {
-                Log.w(TAG, "poll failed: ${e.message}")
+            val text = pollAssistantText(sessionID)
+            if (text != null && text.isNotEmpty() && isAssistantFinished(sessionID)) {
+                return text
             }
-            Thread.sleep(1200)
+            Thread.sleep(1000)
         }
-        throw RuntimeException(lastError ?: "timeout waiting for assistant reply")
+        throw RuntimeException("timeout waiting for assistant reply")
     }
 
     private fun completionJson(model: String, text: String): String {
