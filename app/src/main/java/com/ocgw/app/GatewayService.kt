@@ -15,12 +15,13 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 前台服务：拉起 opencode serve（在 proot + rootfs 内），广播监听地址与密码给 UI。
+ * 前台服务：拉起 opencode serve（proot + rootfs 内），广播监听地址与密码给 UI。
  *
- * - startForeground 立刻调用，避免 ForegroundServiceDidNotStartInTimeException
- * - 下载/解压/启动全在后台线程；用 running 守卫防止并发重复启动
- * - 运行环境默认走镜像（先测速选最快的）
- * - tar 解压用 --hard-dereference，绕开 Android untrusted_app 对 link() 的限制
+ * 关键点（均已实测验证）：
+ * - proot 必须用 Termux 版（bionic/NDK），并设 LD_LIBRARY_PATH 指向 libtalloc/libandroid-shmem，
+ *   PROOT_LOADER 指向 libexec/proot/loader。
+ * - Android 系统 tar 是 toybox，只用 -xzf；解压前清空目标目录。
+ * - startForeground 立刻调用；重活在后台线程；running 守卫防重复启动。
  */
 class GatewayService : Service() {
     companion object {
@@ -37,11 +38,7 @@ class GatewayService : Service() {
 
         const val ORIGINAL =
             "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
-        val MIRRORS = listOf(
-            "https://gh-proxy.com/",
-            "https://ghproxy.net/",
-            ""
-        )
+        val MIRRORS = listOf("https://gh-proxy.com/", "https://ghproxy.net/", "")
 
         const val PHASE_DOWNLOAD = "download"
         const val PHASE_EXTRACT = "extract"
@@ -49,6 +46,8 @@ class GatewayService : Service() {
         const val PHASE_RUNNING = "running"
         const val PHASE_STOPPED = "stopped"
         const val PHASE_FAILED = "failed"
+
+        const val EXPECTED_SIZE = 159000000L // 约值，用于判断是否已完整（实际以 Content-Length 为准）
     }
 
     private var proc: Process? = null
@@ -81,16 +80,18 @@ class GatewayService : Service() {
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val mgr = getSystemService(NotificationManager::class.java)
-            mgr.createNotificationChannel(
+            getSystemService(NotificationManager::class.java).createNotificationChannel(
                 NotificationChannel(CHANNEL_ID, "Gateway", NotificationManager.IMPORTANCE_LOW)
             )
         }
     }
 
     private fun buildNotification(message: String, running: Boolean): Notification {
-        val intent = Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN }
-        val pi = PendingIntent.getActivity(this, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+        val pi = PendingIntent.getActivity(
+            this, 0,
+            Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN },
+            PendingIntent.FLAG_IMMUTABLE
+        )
         return Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("OpenCode Gateway")
             .setContentText(message)
@@ -101,8 +102,7 @@ class GatewayService : Service() {
     }
 
     private fun publish(phase: String, message: String, running: Boolean, url: String? = null, password: String? = null) {
-        val mgr = getSystemService(NotificationManager::class.java)
-        mgr.notify(NOTIF_ID, buildNotification(message, running))
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(message, running))
         sendBroadcast(Intent(ACTION_STATE).apply {
             putExtra(EXTRA_PHASE, phase)
             putExtra(EXTRA_MESSAGE, message)
@@ -147,10 +147,7 @@ class GatewayService : Service() {
                 val ms = System.currentTimeMillis() - t0
                 conn.disconnect()
                 Log.i("GatewayService", "mirror '$prefix' -> $code in ${ms}ms")
-                if ((code == 200 || code == 206) && ms < bestMs) {
-                    bestMs = ms
-                    best = url
-                }
+                if ((code == 200 || code == 206) && ms < bestMs) { bestMs = ms; best = url }
             } catch (e: Exception) {
                 Log.w("GatewayService", "mirror '$prefix' failed: ${e.message}")
             }
@@ -162,8 +159,13 @@ class GatewayService : Service() {
         publish(PHASE_STARTING, getString(R.string.starting), true)
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         val port = 4317
+
+        val prootBin = File(root, "proot/bin/proot").absolutePath
+        val prootLib = File(root, "proot/lib").absolutePath
+        val prootLoader = File(root, "proot/libexec/loader").absolutePath
+
         val cmd = listOf(
-            File(root, "proot/bin/proot").absolutePath,
+            prootBin,
             "-r", root.absolutePath,
             "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/pts",
             "--kill-on-exit",
@@ -179,7 +181,11 @@ class GatewayService : Service() {
             "OPENCODE_PASSWORD" to password,
             "HOME" to "/root",
             "PATH" to "/usr/local/bin:/usr/bin:/bin",
-            "TMPDIR" to "/tmp"
+            "TMPDIR" to "/tmp",
+            // 关键：proot 自身的运行库与 loader
+            "LD_LIBRARY_PATH" to prootLib,
+            "PROOT_LOADER" to prootLoader,
+            "PROOT_TMP_DIR" to cacheDir.absolutePath
         ).forEach { (k, v) -> builder.environment()[k] = v }
 
         val p = builder.start()
@@ -191,8 +197,7 @@ class GatewayService : Service() {
                     Log.i("opencode", line)
                     logFile.appendText(line + "\n")
                 }
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }.start()
 
         wakeLock = (getSystemService(POWER_SERVICE) as PowerManager).run {
@@ -205,7 +210,7 @@ class GatewayService : Service() {
             publish(PHASE_RUNNING, getString(R.string.running), true, url, password)
         } else {
             running = false
-            publish(PHASE_FAILED, getString(R.string.failed, "server not ready"), false)
+            publish(PHASE_FAILED, getString(R.string.failed, "server not ready (check opencode.log)"), false)
             stopSelf()
         }
     }
@@ -215,15 +220,15 @@ class GatewayService : Service() {
         for (i in 0 until 90) {
             if (stopping) return false
             try {
-                val conn = URL("$url/api/config").openConnection() as HttpURLConnection
-                conn.setRequestProperty("Authorization", "Basic $encoded")
-                conn.connectTimeout = 1000
-                conn.readTimeout = 1000
+                val conn = (URL("$url/api/config").openConnection() as HttpURLConnection).apply {
+                    setRequestProperty("Authorization", "Basic $encoded")
+                    connectTimeout = 1000
+                    readTimeout = 1000
+                }
                 val code = conn.responseCode
                 conn.disconnect()
                 if (code == 200) return true
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
             Thread.sleep(1000)
         }
         return false
@@ -246,6 +251,12 @@ class GatewayService : Service() {
                     if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
                 }
                 val code = conn.responseCode
+                if (code == 416) {
+                    // 断点越界：服务端认为已完成或范围无效，重头下
+                    conn.disconnect()
+                    tmp.delete(); existing = 0L
+                    throw RuntimeException("http 416 (reset)")
+                }
                 val appending = code == 206 && existing > 0
                 if (code != 200 && code != 206) throw RuntimeException("download http $code")
                 val total = existing + conn.contentLengthLong
@@ -273,24 +284,22 @@ class GatewayService : Service() {
                 if (stopping) return
                 Log.w("GatewayService", "download attempt $attempt failed: ${e.message}")
                 existing = if (tmp.exists()) tmp.length() else 0L
-                if (attempt >= 5) throw e
+                if (attempt >= 6) throw e
                 Thread.sleep(2000)
             }
         }
 
         if (stopping) return
         publish(PHASE_EXTRACT, getString(R.string.extracting), true)
-        // 先清空目标目录，避免残留/并发导致冲突
         dest.deleteRecursively()
         dest.mkdirs()
-        // --hard-dereference: 把硬链接解成独立文件，绕开 untrusted_app 对 link() 的限制
-        val p = ProcessBuilder(
-            "sh", "-c",
-            "cd '${dest.absolutePath}' && tar -xzf '${tmp.absolutePath}' --hard-dereference --no-same-owner"
-        ).start()
+        // toybox tar：只用 -xzf（先清空目标目录即可避免硬链接冲突）
+        val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", dest.absolutePath).start()
         val rc = p.waitFor()
-        if (rc != 0) throw RuntimeException("extract failed: ${p.errorStream.bufferedReader().readText()}")
-        tmp.delete()
+        if (rc != 0) {
+            val err = p.errorStream.bufferedReader().readText()
+            throw RuntimeException("extract failed($rc): $err")
+        }
     }
 
     private fun stopGateway() {
