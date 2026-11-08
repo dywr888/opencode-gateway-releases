@@ -25,6 +25,7 @@ import java.net.URL
  * - 项目目录：app 无法按硬路径访问 /sdcard（scoped storage），
  *   故用 SAF 把文件拷进 filesDir/workspace，再挂载。
  * - waitForReady 不能只认 200：/api/config 可能返回 500（如目录不可读），需尽快失败而不是空转。
+ * - **下载/解压/启动进度通过广播 EXTRA_PROGRESS 传回 UI，0-100，-1 表示不定长**。
  */
 class GatewayService : Service() {
     companion object {
@@ -35,6 +36,7 @@ class GatewayService : Service() {
         const val EXTRA_PASSWORD = "password"
         const val EXTRA_PHASE = "phase"
         const val EXTRA_MESSAGE = "message"
+        const val EXTRA_PROGRESS = "progress"
         const val EXTRA_GATEWAY = "gateway"
 
         const val CHANNEL_ID = "gateway"
@@ -78,8 +80,8 @@ class GatewayService : Service() {
         when (intent?.action) {
             ACTION_START -> {
                 val alreadyReady = ready(File(filesDir, "rootfs"))
-                val initial = if (alreadyReady) "正在启动…" else "正在下载运行环境…"
-                startForeground(NOTIF_ID, buildNotification(initial, true))
+                val initial = if (alreadyReady) "正在启动…" else "正在准备运行环境…"
+                startForeground(NOTIF_ID, buildNotification(initial, true, 0))
 
                 synchronized(lock) {
                     if (busy) {
@@ -103,29 +105,36 @@ class GatewayService : Service() {
         }
     }
 
-    private fun buildNotification(message: String, running: Boolean): Notification {
+    private fun buildNotification(message: String, running: Boolean, progress: Int): Notification {
         val pi = PendingIntent.getActivity(
             this, 0,
             Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN },
             PendingIntent.FLAG_IMMUTABLE
         )
-        return Notification.Builder(this, CHANNEL_ID)
+        val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("OpenCode")
             .setContentText(message)
             .setSmallIcon(android.R.drawable.ic_menu_view)
-            .setContentIntent(pi)
+            .setContentIntent(PendingIntent.getActivity(
+                this, 0,
+                Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN },
+                PendingIntent.FLAG_IMMUTABLE
+            ))
             .setOngoing(running)
-            .build()
+        if (progress >= 0) builder.setProgress(100, progress, false)
+        return builder.build()
     }
 
     private fun publish(
         phase: String, message: String, running: Boolean,
         url: String? = null, password: String? = null, gatewayUrl: String? = null,
+        progress: Int = -1,
     ) {
-        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(message, running))
+        getSystemService(NotificationManager::class.java).notify(NOTIF_ID, buildNotification(message, running, progress))
         sendBroadcast(Intent(ACTION_STATE).apply {
             putExtra(EXTRA_PHASE, phase)
             putExtra(EXTRA_MESSAGE, message)
+            putExtra(EXTRA_PROGRESS, progress)
             if (url != null) putExtra(EXTRA_URL, url)
             if (password != null) putExtra(EXTRA_PASSWORD, password)
             if (gatewayUrl != null) putExtra(EXTRA_GATEWAY, gatewayUrl)
@@ -143,11 +152,11 @@ class GatewayService : Service() {
                     Log.i("GatewayService", "rootfs already present; skip download")
                 }
                 if (stopping) return@Thread
-                if (!ready(root)) throw RuntimeException("rootfs 不完整")
+                if (!ready(root)) throw RuntimeException("rootfs incomplete after extract")
                 startServer(root)
             } catch (e: Exception) {
                 Log.e("GatewayService", "prepare/start failed", e)
-                publish(PHASE_FAILED, "失败：${e.message ?: e.javaClass.simpleName}", false)
+                publish(PHASE_FAILED, "失败：${e.message ?: e.javaClass.simpleName}", false, progress = -1)
                 stopSelf()
             } finally {
                 synchronized(lock) { busy = false }
@@ -222,14 +231,14 @@ class GatewayService : Service() {
     } catch (_: Exception) { -1L }
 
     private fun startServer(root: File) {
-        publish(PHASE_STARTING, "正在启动…", true)
+        publish(PHASE_STARTING, "正在启动…", true, progress = 0)
         writeResolvConf(root)
 
         // 1) 同步项目文件到私有 workspace（app 无法直接访问 /sdcard）
         val ws = ProjectStore.workspaceDir(this)
         val projectUri = ProjectStore.load(this)
         if (projectUri != null) {
-            publish(PHASE_STARTING, "正在同步项目文件…", true)
+            publish(PHASE_STARTING, "正在同步项目文件…", true, progress = 0)
             val n = ProjectStore.syncToWorkspace(this, projectUri)
             Log.i("GatewayService", "project sync: $n files")
             if (n < 0) Log.w("GatewayService", "project sync failed, using existing workspace")
@@ -237,7 +246,6 @@ class GatewayService : Service() {
         // 容器内 /workspace 指向私有目录
         val containerWs = File(root, "workspace")
         if (containerWs.exists() && containerWs.absolutePath != ws.absolutePath) {
-            // 若 rootfs 里是空目录，删掉以便挂载
             containerWs.deleteRecursively()
         }
 
@@ -295,7 +303,7 @@ class GatewayService : Service() {
 
         val url = "http://127.0.0.1:$OPENCODE_PORT"
         if (!waitForReady(url, password)) {
-            publish(PHASE_FAILED, "服务启动失败，请查看日志", false)
+            publish(PHASE_FAILED, "服务启动失败，请查看日志", false, progress = -1)
             stopSelf()
             return
         }
@@ -315,14 +323,13 @@ class GatewayService : Service() {
         gateway = gw
 
         val gatewayUrl = "http://127.0.0.1:$GATEWAY_PORT/v1"
-        publish(PHASE_RUNNING, "已就绪", true, url, password, gatewayUrl)
+        publish(PHASE_RUNNING, "已就绪", true, url, password, gatewayUrl, progress = 100)
         Log.i("GatewayService", "READY ui=$url gateway=$gatewayUrl workspace=${ws.absolutePath}")
     }
 
-    /** 就绪判定：200 即可；401 说明服务已监听（鉴权配置差异），也算就绪 */
+    /** 就绪判定：200 即可；401/403/500 也说明 HTTP 服务已起来，容错接受 */
     private fun waitForReady(url: String, password: String): Boolean {
         val encoded = android.util.Base64.encodeToString("opencode:$password".toByteArray(), android.util.Base64.NO_WRAP)
-        var lastCode = 0
         for (i in 0 until 60) {
             if (stopping) return false
             try {
@@ -330,24 +337,24 @@ class GatewayService : Service() {
                     connectTimeout = 1500
                     readTimeout = 3000
                 }
-                lastCode = conn.responseCode
+                val code = conn.responseCode
                 conn.disconnect()
-                Log.i("GatewayService", "ready probe -> $lastCode")
-                if (lastCode == 200) return true
-                // 401/403/500 都说明 HTTP 服务已起来；再等 2 次仍未 200 就接受
-                if (lastCode in intArrayOf(401, 403, 500) && i >= 2) {
-                    Log.w("GatewayService", "server up but /api/config=$lastCode, continue anyway")
+                Log.i("GatewayService", "ready probe -> $code")
+                if (code == 200) return true
+                // 401/403/500 说明 HTTP 服务已起来；容错
+                if (code in intArrayOf(401, 403, 500) && i >= 2) {
+                    Log.w("GatewayService", "server up but /api/config=$code, continue anyway")
                     return true
                 }
             } catch (_: Exception) {}
             Thread.sleep(1000)
         }
-        Log.w("GatewayService", "waitForReady timeout, last=$lastCode")
-        return lastCode != 0
+        Log.w("GatewayService", "waitForReady timeout")
+        return false
     }
 
     private fun downloadAndExtract(dest: File) {
-        publish(PHASE_DOWNLOAD, "选择最快镜像…", true)
+        publish(PHASE_DOWNLOAD, "选择最快镜像…", true, progress = 0)
         val url = pickFastestMirror()
         Log.i("GatewayService", "download from $url")
         val tmp = File(cacheDir, "rootfs-arm64.tar.gz")
@@ -361,7 +368,7 @@ class GatewayService : Service() {
         var attempt = 0
         while (true) {
             attempt++
-            val existing = if (tmp.exists()) tmp.length() else 0L
+            var existing = if (tmp.exists()) tmp.length() else 0L
             try {
                 val conn = (URL(url).openConnection() as HttpURLConnection).apply {
                     connectTimeout = 15000
@@ -372,7 +379,7 @@ class GatewayService : Service() {
                 if (code == 416) {
                     conn.disconnect()
                     tmp.delete()
-                    throw RuntimeException("http 416")
+                    throw RuntimeException("http 416 (reset)")
                 }
                 val appending = code == 206 && existing > 0
                 if (code != 200 && code != 206) throw RuntimeException("download http $code")
@@ -390,7 +397,8 @@ class GatewayService : Service() {
                             val now = System.currentTimeMillis()
                             if (now - lastTick > 1000 && total > 0) {
                                 lastTick = now
-                                publish(PHASE_DOWNLOAD, "下载中 ${(done * 100 / total)}%", true)
+                                val pct = (done * 100 / total).toInt()
+                                publish(PHASE_DOWNLOAD, "下载中 ${pct}%", true, progress = pct)
                             }
                         }
                     }
@@ -406,14 +414,28 @@ class GatewayService : Service() {
         }
 
         if (stopping) return
-        publish(PHASE_EXTRACT, "正在解压…", true)
+        publish(PHASE_EXTRACT, "正在解压…", true, progress = 0)
 
         val staging = File(filesDir, "rootfs.staging")
         staging.deleteRecursively()
         if (!staging.mkdirs() && !staging.exists()) throw RuntimeException("cannot create staging")
 
         val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", staging.absolutePath).start()
+        // 解压进度没法精确，用 indeterminate 或简单心跳
+        var extractTick = 0L
+        val extractWatcher = Thread {
+            while (!Thread.currentThread().isInterrupted && !stopping) {
+                Thread.sleep(1000)
+                if (stopping) return
+                runOnUiThread { publish(PHASE_EXTRACT, "正在解压…", true, progress = (extractTick % 4) * 25) }
+                extractTick++
+            }
+        }
+        extractWatcher.start()
+
+        val p = ProcessBuilder("tar", "-xzf", tmp.absolutePath, "-C", staging.absolutePath).start()
         val rc = p.waitFor()
+        extractWatcher.interrupt()
         if (rc != 0) {
             val err = p.errorStream.bufferedReader().readText()
             staging.deleteRecursively()
@@ -440,7 +462,7 @@ class GatewayService : Service() {
         proc = null
         try { wakeLock?.release() } catch (_: Exception) {}
         wakeLock = null
-        publish(PHASE_STOPPED, "已停止", false)
+        publish(PHASE_STOPPED, "已停止", false, progress = -1)
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
     }
