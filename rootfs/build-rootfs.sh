@@ -16,12 +16,12 @@ tar -xzf /tmp/ubuntu-base.tar.gz -C "$ROOT"
 rm -f /tmp/ubuntu-base.tar.gz
 
 echo "== 准备 chroot 运行环境（原生 arm64，无需 qemu）=="
-mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts"
+mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts" "$ROOT/tmp"
+chmod 1777 "$ROOT/tmp"
 # DNS：opencode 联网要用
 echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
 # ubuntu-base 24.04 自带 deb822 的 ubuntu.sources；删除任何旧式 sources.list 避免重复声明冲突
 rm -f "$ROOT/etc/apt/sources.list"
-# 确保 ubuntu.sources 指向 noble 的 arm64 ports（ubuntu-base 默认可能就是正确的，这里兜底重写）
 mkdir -p "$ROOT/etc/apt/sources.list.d"
 cat > "$ROOT/etc/apt/sources.list.d/ubuntu.sources" <<'EOF'
 Types: deb
@@ -32,7 +32,8 @@ Architectures: arm64
 EOF
 
 echo "== 安装基础工具（curl/ca-certificates 等）=="
-sudo chroot "$ROOT" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends \
+# 关键：chroot 内 /tmp 必须可写，否则 apt-key GPG 验证会失败
+sudo chroot "$ROOT" /bin/bash -c "mkdir -p /tmp && chmod 1777 /tmp && apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates curl wget libc6 coreutils bash tar gzip" || {
     echo "apt 安装失败"; exit 1
   }
@@ -49,7 +50,7 @@ sudo du -h "$ROOT/proot/bin/proot"
 
 echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
-sudo chroot "$ROOT" /bin/bash -c "curl -fsSL https://opencode.ai/v2/install | bash"
+sudo chroot "$ROOT" /bin/bash -c "mkdir -p /tmp && chmod 1777 /tmp && curl -fsSL https://opencode.ai/v2/install | bash"
 
 echo "== 定位 opencode 二进制（全部 sudo，规避 .opencode 目录 700 权限）=="
 FOUND=""
