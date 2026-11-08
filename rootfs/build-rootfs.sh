@@ -12,25 +12,24 @@ mkdir -p "$ROOT"
 
 echo "== 下载并解压 ubuntu-base (arm64 glibc rootfs) =="
 curl -fsSL "$BASE_URL" -o /tmp/ubuntu-base.tar.gz
-# ubuntu-base 解出来顶层是 ./bin ./etc ... 直接解到 ROOT
 tar -xzf /tmp/ubuntu-base.tar.gz -C "$ROOT"
 rm -f /tmp/ubuntu-base.tar.gz
 
-echo "== 准备 chroot 内运行环境（原生 arm64，无需 qemu）=="
-# 挂载点占位（安卓端 proot 会 -b 绑定，这里只保证目录存在）
+echo "== 准备 chroot 运行环境（原生 arm64，无需 qemu）=="
 mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts"
-# 解决 DNS：用公共 resolver，opencode 客户端联网要用
-if [ ! -f "$ROOT/etc/resolv.conf" ]; then
-  echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
-fi
+# DNS：opencode 联网要用
+echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
+# ubuntu-base 默认无 apt 源，须手动写（Ubuntu 24.04 arm64 ports 源）
+cat > "$ROOT/etc/apt/sources.list" <<'EOF'
+deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+EOF
 
 echo "== 安装基础工具（curl/ca-certificates 等）=="
-# ubuntu-base 极简，需补 curl 才能装 opencode
 sudo chroot "$ROOT" /bin/bash -c "apt-get update && apt-get install -y --no-install-recommends \
   ca-certificates curl wget libc6 coreutils bash tar gzip" || {
-    # 某些 ubuntu-base 无 apt 源，手动补 curl + ca-certificates
-    echo "apt 安装失败，尝试直接下载 curl 静态依赖（极少情况）"
-    exit 1
+    echo "apt 安装失败"; exit 1
   }
 
 echo "== 下载 proot 静态二进制（官方 proot-me/proot release）=="
