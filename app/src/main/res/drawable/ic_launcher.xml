@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 背景圆 -->
+    <path
+        android:fillColor="#4F7CFF"
+        android:pathData="M54,0 C78.54,0 108,29.46 108,54 C108,78.54 78.54,108 54,108 C29.46,108 0,78.54 0,54 C0,29.46 29.46,0 54,0 Z" />
+    <!-- 终端/代码符号：尖括号 + 点 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,27 L45,42 L30,57" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M78,27 L63,42 L78,57" />
+    <!-- 中间连接线表示网关/桥接 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,40 L60,40"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+</vector>
