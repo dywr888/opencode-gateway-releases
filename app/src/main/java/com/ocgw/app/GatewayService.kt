@@ -15,11 +15,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 /**
- * 前台服务：负责拉起 opencode serve（在 proot + rootfs 内），并对外广播
- * 监听地址与 Basic Auth 密码。MainActivity 拿到后加载 WebView 并可用于原生调用网关。
+ * 前台服务：拉起 opencode serve（在 proot + rootfs 内），广播监听地址与密码给 UI。
  *
- * 关键：必须在 onStartCommand 里立刻 startForeground()，否则 Android 8+ 抛
- * ForegroundServiceDidNotStartInTimeException 崩溃。重活（下载/解压/启动）全在后台线程。
+ * - onStartCommand 立刻 startForeground()，避免 ForegroundServiceDidNotStartInTimeException
+ * - 下载/解压/启动全在后台线程
+ * - 运行环境默认走镜像（先测速选最快的）
  */
 class GatewayService : Service() {
     companion object {
@@ -34,9 +34,15 @@ class GatewayService : Service() {
         const val CHANNEL_ID = "gateway"
         const val NOTIF_ID = 1
 
-        // 运行环境包（proot + rootfs + opencode），首次启动下载。
-        const val RELEASE_BASE = "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs"
-        const val ROOTFS_NAME = "rootfs-arm64.tar.gz"
+        // 原始 Release 地址（github.com 在国内常被墙，故默认走镜像）
+        const val ORIGINAL =
+            "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
+        // 镜像前缀（拼接原始完整 URL）。空串 = 直连，作兜底。
+        val MIRRORS = listOf(
+            "https://gh-proxy.com/",
+            "https://ghproxy.net/",
+            ""
+        )
 
         const val PHASE_DOWNLOAD = "download"
         const val PHASE_EXTRACT = "extract"
@@ -61,7 +67,6 @@ class GatewayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                // 立刻进入前台，避免 ForegroundServiceDidNotStartInTimeException
                 startForeground(NOTIF_ID, buildNotification(getString(R.string.downloading), true))
                 startGatewayAsync()
             }
@@ -73,8 +78,9 @@ class GatewayService : Service() {
     private fun createChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val mgr = getSystemService(NotificationManager::class.java)
-            val ch = NotificationChannel(CHANNEL_ID, "Gateway", NotificationManager.IMPORTANCE_LOW)
-            mgr.createNotificationChannel(ch)
+            mgr.createNotificationChannel(
+                NotificationChannel(CHANNEL_ID, "Gateway", NotificationManager.IMPORTANCE_LOW)
+            )
         }
     }
 
@@ -90,17 +96,15 @@ class GatewayService : Service() {
             .build()
     }
 
-    /** 更新通知 + 广播状态给 UI */
     private fun publish(phase: String, message: String, running: Boolean, url: String? = null, password: String? = null) {
         val mgr = getSystemService(NotificationManager::class.java)
         mgr.notify(NOTIF_ID, buildNotification(message, running))
-        val b = Intent(ACTION_STATE).apply {
+        sendBroadcast(Intent(ACTION_STATE).apply {
             putExtra(EXTRA_PHASE, phase)
             putExtra(EXTRA_MESSAGE, message)
             if (url != null) putExtra(EXTRA_URL, url)
             if (password != null) putExtra(EXTRA_PASSWORD, password)
-        }
-        sendBroadcast(b)
+        })
     }
 
     private fun startGatewayAsync() {
@@ -122,24 +126,47 @@ class GatewayService : Service() {
         }.also { it.start() }
     }
 
+    /** 对每个镜像发小 Range 请求测速，返回最快可用的完整下载 URL */
+    private fun pickFastestMirror(): String {
+        var best = ORIGINAL
+        var bestMs = Long.MAX_VALUE
+        for (prefix in MIRRORS) {
+            val url = prefix + ORIGINAL
+            try {
+                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 6000
+                    readTimeout = 8000
+                    setRequestProperty("Range", "bytes=0-1023")
+                }
+                val t0 = System.currentTimeMillis()
+                val code = conn.responseCode
+                val ms = System.currentTimeMillis() - t0
+                conn.disconnect()
+                Log.i("GatewayService", "mirror $prefix -> $code in ${ms}ms")
+                if ((code == 200 || code == 206) && ms < bestMs) {
+                    bestMs = ms
+                    best = url
+                }
+            } catch (e: Exception) {
+                Log.w("GatewayService", "mirror $prefix failed: ${e.message}")
+            }
+        }
+        return best
+    }
+
     private fun startServer(root: File) {
         publish(PHASE_STARTING, getString(R.string.starting), true)
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         val port = 4317
-        val cmd = buildList {
-            add(File(root, "proot/bin/proot").absolutePath)
-            add("-r"); add(root.absolutePath)
-            add("-b"); add("/dev")
-            add("-b"); add("/proc")
-            add("-b"); add("/sys")
-            add("-b"); add("/dev/pts")
-            add("--kill-on-exit")
-            add("-w"); add("/workspace")
-            add("/opencode/bin/opencode")
-            add("serve")
-            add("--hostname"); add("127.0.0.1")
-            add("--port"); add(port.toString())
-        }
+        val cmd = listOf(
+            File(root, "proot/bin/proot").absolutePath,
+            "-r", root.absolutePath,
+            "-b", "/dev", "-b", "/proc", "-b", "/sys", "-b", "/dev/pts",
+            "--kill-on-exit",
+            "-w", "/workspace",
+            "/opencode/bin/opencode", "serve",
+            "--hostname", "127.0.0.1", "--port", port.toString()
+        )
         val builder = ProcessBuilder(cmd)
             .directory(File(root, "workspace").also { it.mkdirs() })
             .redirectErrorStream(true)
@@ -153,7 +180,6 @@ class GatewayService : Service() {
 
         val p = builder.start()
         proc = p
-        // 把 opencode 的 stdout/stderr 写进日志文件，便于排查
         val logFile = File(cacheDir, "opencode.log")
         Thread {
             try {
@@ -170,18 +196,16 @@ class GatewayService : Service() {
         }
 
         val url = "http://127.0.0.1:$port"
-        val ok = waitForReady(url, password)
-        if (ok) {
+        if (waitForReady(url, password)) {
             publish(PHASE_RUNNING, getString(R.string.running), true, url, password)
         } else {
-            publish(PHASE_FAILED, getString(R.string.failed, "server not ready (see cache/opencode.log)"), false)
+            publish(PHASE_FAILED, getString(R.string.failed, "server not ready"), false)
             stopSelf()
         }
     }
 
     private fun waitForReady(url: String, password: String): Boolean {
-        val auth = "opencode:$password"
-        val encoded = android.util.Base64.encodeToString(auth.toByteArray(), android.util.Base64.NO_WRAP)
+        val encoded = android.util.Base64.encodeToString("opencode:$password".toByteArray(), android.util.Base64.NO_WRAP)
         for (i in 0 until 90) {
             if (stopping) return false
             try {
@@ -200,40 +224,53 @@ class GatewayService : Service() {
     }
 
     private fun downloadAndExtract(dest: File) {
-        publish(PHASE_DOWNLOAD, getString(R.string.downloading), true)
-        val url = "$RELEASE_BASE/$ROOTFS_NAME"
-        val tmp = File(cacheDir, ROOTFS_NAME)
-        // 支持断点续传：已存在部分文件则从断点继续
+        publish(PHASE_DOWNLOAD, "选择最快镜像…", true)
+        val url = pickFastestMirror()
+        Log.i("GatewayService", "download from $url")
+        val tmp = File(cacheDir, "rootfs-arm64.tar.gz")
+
         var existing = if (tmp.exists()) tmp.length() else 0L
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-            connectTimeout = 15000
-            readTimeout = 30000
-            if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
-        }
-        val code = conn.responseCode
-        val appending = code == 206 && existing > 0
-        if (code != 200 && code != 206) throw RuntimeException("download http $code")
-        val total = existing + conn.contentLengthLong
-        conn.inputStream.use { input ->
-            java.io.FileOutputStream(tmp, appending).use { out ->
-                val buf = ByteArray(64 * 1024)
-                var read: Int
-                var done = if (appending) existing else 0L
-                var lastTick = 0L
-                while (input.read(buf).also { read = it } > 0) {
-                    if (stopping) throw InterruptedException("stopped")
-                    out.write(buf, 0, read)
-                    done += read
-                    val now = System.currentTimeMillis()
-                    if (now - lastTick > 1000 && total > 0) {
-                        lastTick = now
-                        val pct = (done * 100 / total).toInt()
-                        publish(PHASE_DOWNLOAD, "下载中 $pct%", true)
+        var attempt = 0
+        while (true) {
+            attempt++
+            try {
+                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 15000
+                    readTimeout = 60000
+                    if (existing > 0) setRequestProperty("Range", "bytes=$existing-")
+                }
+                val code = conn.responseCode
+                val appending = code == 206 && existing > 0
+                if (code != 200 && code != 206) throw RuntimeException("download http $code")
+                val total = existing + conn.contentLengthLong
+                conn.inputStream.use { input ->
+                    java.io.FileOutputStream(tmp, appending).use { out ->
+                        val buf = ByteArray(128 * 1024)
+                        var read: Int
+                        var done = if (appending) existing else 0L
+                        var lastTick = 0L
+                        while (input.read(buf).also { read = it } > 0) {
+                            if (stopping) throw InterruptedException("stopped")
+                            out.write(buf, 0, read)
+                            done += read
+                            val now = System.currentTimeMillis()
+                            if (now - lastTick > 1000 && total > 0) {
+                                lastTick = now
+                                publish(PHASE_DOWNLOAD, "下载中 ${(done * 100 / total)}%", true)
+                            }
+                        }
                     }
                 }
+                conn.disconnect()
+                break
+            } catch (e: Exception) {
+                if (stopping) return
+                Log.w("GatewayService", "download attempt $attempt failed: ${e.message}")
+                existing = if (tmp.exists()) tmp.length() else 0L
+                if (attempt >= 5) throw e
+                Thread.sleep(2000)
             }
         }
-        conn.disconnect()
 
         if (stopping) return
         publish(PHASE_EXTRACT, getString(R.string.extracting), true)
