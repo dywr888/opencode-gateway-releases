@@ -22,7 +22,6 @@ jobs:
           distribution: temurin
           java-version: 17
       - name: Configure preinstalled Android SDK
-        # ubuntu-latest 预装 SDK 在 /usr/local/lib/android/sdk；直接指向，不用 setup-android action
         run: |
           echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
@@ -37,6 +36,16 @@ jobs:
           curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
           unzip -q /tmp/gradle.zip -d /opt
           echo "/opt/gradle-8.9/bin" >> "$GITHUB_PATH"
+      - name: Get version info
+        id: version
+        run: |
+          # 从 gradle.properties 或 settings.gradle 读版本，或用日期+commit
+          VERSION="1.0.0"
+          DATE=$(date -u +%Y%m%d)
+          SHA=$(git rev-parse --short HEAD)
+          TAG="v${VERSION}-${DATE}-${SHA}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
       - name: Build release APK
         env:
           KEYSTORE: ${{ github.workspace }}/release.keystore
@@ -45,14 +54,24 @@ jobs:
           KEY_PASSWORD: android
         run: |
           gradle assembleRelease \
-            -Pandroid.injected.signing.store.file="$KEYSTORE" \
-            -Pandroid.injected.signing.store.password="$KEYSTORE_PASSWORD" \
-            -Pandroid.injected.signing.key.alias="$KEY_ALIAS" \
-            -Pandroid.injected.signing.key.password="$KEY_PASSWORD"
-      - name: Upload APK
+            -Pandroid.injected.signing.store.file="${{ github.workspace }}/release.keystore" \
+            -Pandroid.injected.signing.store.password="${KEYSTORE_PASSWORD}" \
+            -Pandroid.injected.signing.key.alias="${KEY_ALIAS}" \
+            -Pandroid.injected.signing.key.password="${KEY_PASSWORD}"
+      - name: Upload APK (unique tag per build)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: apk
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: "OpenCode Gateway ${{ steps.version.outputs.tag }}"
+          body: |
+            **OpenCode Gateway** for Android
+            - Version: ${{ steps.version.outputs.version }}
+            - Build: ${{ steps.version.outputs.tag }}
+            - Date: $(date -u)
+            - Commit: ${{ github.sha }}
+            - Mirror: gh-proxy.com / ghproxy.net
+            - Gateway port: 4318
+            - OpenCode port: 4317
           files: app/build/outputs/apk/release/*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
