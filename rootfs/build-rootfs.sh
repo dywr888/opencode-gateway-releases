@@ -19,11 +19,16 @@ echo "== 准备 chroot 运行环境（原生 arm64，无需 qemu）=="
 mkdir -p "$ROOT/dev" "$ROOT/proc" "$ROOT/sys" "$ROOT/dev/pts"
 # DNS：opencode 联网要用
 echo "nameserver 8.8.8.8" > "$ROOT/etc/resolv.conf"
-# ubuntu-base 默认无 apt 源，须手动写（Ubuntu 24.04 arm64 ports 源）
-cat > "$ROOT/etc/apt/sources.list" <<'EOF'
-deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+# ubuntu-base 24.04 自带 deb822 的 ubuntu.sources；删除任何旧式 sources.list 避免重复声明冲突
+rm -f "$ROOT/etc/apt/sources.list"
+# 确保 ubuntu.sources 指向 noble 的 arm64 ports（ubuntu-base 默认可能就是正确的，这里兜底重写）
+mkdir -p "$ROOT/etc/apt/sources.list.d"
+cat > "$ROOT/etc/apt/sources.list.d/ubuntu.sources" <<'EOF'
+Types: deb
+URIs: http://ports.ubuntu.com/ubuntu-ports
+Suites: noble noble-updates noble-security
+Components: main restricted universe multiverse
+Architectures: arm64
 EOF
 
 echo "== 安装基础工具（curl/ca-certificates 等）=="
