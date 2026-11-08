@@ -8,6 +8,9 @@ on:
       - 'gradle.properties'
       - '.github/workflows/build-apk.yml'
 
+permissions:
+  contents: write
+
 jobs:
   apk:
     runs-on: ubuntu-latest
@@ -18,20 +21,27 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Accept licenses
-        run: yes | sdkmanager --licenses || true
-      - name: Install Gradle
+      - name: Configure preinstalled Android SDK
+        # ubuntu-latest 预装 SDK 在 /usr/local/lib/android/sdk；直接指向，不用 setup-android action
         run: |
-          curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o gradle.zip
-          unzip -q gradle.zip
-          echo "$PWD/gradle-8.9/bin" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> "$GITHUB_ENV"
+          ls /usr/local/lib/android/sdk/platforms || true
       - name: Generate signing keystore
         run: |
           keytool -genkeypair -v -keystore release.keystore -keyalg RSA -keysize 2048 \
             -validity 10000 -alias ocgw -dname "CN=OCGW" \
             -storepass android -keypass android
+      - name: Set up Gradle 8.9
+        run: |
+          curl -fsSL https://services.gradle.org/distributions/gradle-8.9-bin.zip -o /tmp/gradle.zip
+          unzip -q /tmp/gradle.zip -d /opt
+          echo "/opt/gradle-8.9/bin" >> "$GITHUB_PATH"
+      - name: Create gradle wrapper (AGP needs a project)
+        run: |
+          cat > build.gradle <<'EOF'
+          // root build file intentionally empty
+          EOF
       - name: Build release APK
         env:
           KEYSTORE: ${{ github.workspace }}/release.keystore
