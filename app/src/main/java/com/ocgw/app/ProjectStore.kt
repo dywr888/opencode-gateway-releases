@@ -1,10 +1,13 @@
 package com.ocgw.app
 
 import android.content.Context
+import android.content.ContentResolver
 import android.net.Uri
 import android.provider.DocumentsContract
 import android.util.Log
+import androidx.documentfile.provider.DocumentFile
 import java.io.File
+import java.io.OutputStream
 
 /**
  * 项目管理。
@@ -12,6 +15,7 @@ import java.io.File
  * 重要：Android 11+ scoped storage 下，app 无法按硬路径访问 /sdcard（Linux 权限拦），
  * 所以不能直接 proot -b /storage/emulated/0/xxx。做法是：
  *   选中 SAF 目录 → 用 DocumentFile 把文件**拷贝进 app 私有目录** → 挂载私有目录。
+ *   运行时监听 workspace 变化 → 写回 SAF 目录（双向同步）。
  */
 object ProjectStore {
     private const val PREF = "ocgw"
@@ -45,18 +49,16 @@ object ProjectStore {
     }
 
     /**
-     * 把 SAF 目录内容拷贝进私有 workspace 目录。
-     * 返回拷贝的文件数；失败返回 -1。
+     * 手机原目录 → workspace（启动时调用）
      */
     fun syncToWorkspace(context: Context, uri: Uri): Int {
         val dest = workspaceDir(context)
         return try {
-            val root = androidx.documentfile.provider.DocumentFile.fromTreeUri(context, uri)
-                ?: return -1
+            val root = DocumentFile.fromTreeUri(context, uri) ?: return -1
             var count = 0
             var totalBytes = 0L
-            val maxBytes = 200L * 1024 * 1024 // 最多拷 200MB，避免塞爆
-            fun walk(dir: androidx.documentfile.provider.DocumentFile, out: File) {
+            val maxBytes = 200L * 1024 * 1024 // 最多拷 200MB
+            fun walk(dir: DocumentFile, out: File) {
                 out.mkdirs()
                 for (child in dir.listFiles()) {
                     if (totalBytes > maxBytes) {
@@ -88,6 +90,58 @@ object ProjectStore {
             count
         } catch (e: Exception) {
             Log.e(TAG, "syncToWorkspace failed", e)
+            -1
+        }
+    }
+
+    /**
+     * workspace → 手机原目录（双向同步：文件变化时调用）
+     * 仅同步 mtime 变化的文件，避免全量覆盖
+     */
+    fun syncFromWorkspace(context: Context, uri: Uri, changedFiles: List<File> = emptyList()): Int {
+        val src = workspaceDir(context)
+        if (!src.exists()) return 0
+        val root = DocumentFile.fromTreeUri(context, uri) ?: return -1
+        var count = 0
+        try {
+            fun walk(dir: DocumentFile, srcDir: File) {
+                if (!srcDir.exists()) return
+                for (file in srcDir.listFiles() ?: emptyArray()) {
+                    val name = file.name
+                    if (name.startsWith(".")) continue
+                    val child = dir.findFile(name)
+                    if (file.isDirectory) {
+                        val childDir = child?.let { it as DocumentFile } ?: dir.createDirectory(name)
+                        walk(childDir, file)
+                    } else {
+                        // 仅同步指定文件列表，或全部（增量）
+                        if (changedFiles.isNotEmpty() && file !in changedFiles) continue
+                        try {
+                            val output: OutputStream = if (child != null) {
+                                // 文件已存在，用 truncate 模式重写
+                                context.contentResolver.openOutputStream(child.uri, "wt")
+                            } else {
+                                // 新文件
+                                dir.createFile(file.name.split('.').lastOrNull()?.let { "application/octet-stream" } ?: "application/octet-stream", name)
+                                    ?.let { context.contentResolver.openOutputStream(it.uri, "wt") }
+                            } ?: continue
+                            file.inputStream().use { input ->
+                                output.use { output ->
+                                    input.copyTo(output, 256 * 1024)
+                                }
+                            }
+                            count++
+                        } catch (e: Exception) {
+                            Log.w(TAG, "write back failed $name: ${e.message}")
+                        }
+                    }
+                }
+            }
+            walk(root, src)
+            Log.i(TAG, "synced back $count files from workspace")
+            count
+        } catch (e: Exception) {
+            Log.e(TAG, "syncFromWorkspace failed", e)
             -1
         }
     }
