@@ -34,13 +34,29 @@ ls -l "$ROOT/proot/bin/proot" || { echo "proot 二进制缺失"; exit 1; }
 
 echo "== 安装 opencode =="
 mkdir -p "$ROOT/opencode/bin"
-# opencode install 默认装到 $HOME/.opencode/bin/opencode（chroot 内 HOME=/root）
 sudo chroot "$ROOT" /bin/bash -c "curl -fsSL https://opencode.ai/v2/install | bash"
-if [ -f "$ROOT/root/.opencode/bin/opencode" ]; then
-  sudo cp "$ROOT/root/.opencode/bin/opencode" "$ROOT/opencode/bin/opencode"
-  sudo chmod +x "$ROOT/opencode/bin/opencode"
+
+echo "== 定位 opencode 二进制（不赌路径）=="
+# install 脚本默认落在 \$HOME/.opencode/bin/opencode，但也可能是 /usr/local/bin/opencode 等
+FOUND=""
+for cand in \
+  "$ROOT/root/.opencode/bin/opencode" \
+  "$ROOT/usr/local/bin/opencode" \
+  "$ROOT/bin/opencode" \
+  "$ROOT/usr/bin/opencode" ; do
+  if [ -f "$cand" ]; then FOUND="$cand"; break; fi
+done
+# 兜底：全盘找名为 opencode 的可执行文件
+if [ -z "$FOUND" ]; then
+  FOUND=$(sudo find "$ROOT" -type f -name opencode -path '*bin*' 2>/dev/null | head -1 || true)
 fi
-ls -l "$ROOT/opencode/bin/opencode" || { echo "opencode 二进制缺失"; exit 1; }
+echo "found opencode at: ${FOUND:-<none>}"
+if [ -z "$FOUND" ] || [ ! -f "$FOUND" ]; then
+  echo "opencode 二进制缺失"; exit 1
+fi
+sudo cp "$FOUND" "$ROOT/opencode/bin/opencode"
+sudo chmod +x "$ROOT/opencode/bin/opencode"
+ls -l "$ROOT/opencode/bin/opencode" || { echo "拷贝后仍缺失"; exit 1; }
 
 echo "== 清理 =="
 sudo chroot "$ROOT" /bin/bash -c "apt-get clean; rm -rf /var/lib/apt/lists/*" || true
