@@ -453,7 +453,7 @@ class GatewayService : Service() {
             while (!Thread.currentThread().isInterrupted && !stopping) {
                 Thread.sleep(1000)
                 if (stopping) return
-                runOnUiThread { publish(PHASE_EXTRACT, "正在解压…", true, progress = (extractTick % 4) * 25) }
+                publish(PHASE_EXTRACT, "正在解压…", true, progress = (extractTick % 4) * 25)
                 extractTick++
             }
         }
