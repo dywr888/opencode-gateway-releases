@@ -13,7 +13,6 @@ import android.util.Log
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.zip.GZIPInputStream
 
 /**
  * 前台服务：负责拉起 opencode serve（在 proot + rootfs 内），并对外广播
@@ -115,6 +114,9 @@ class GatewayService : Service() {
                 add("/proc")
                 add("-b")
                 add("/sys")
+                add("-b")
+                add("/dev/pts")
+                add("--kill-on-exit")
                 add("-w")
                 add("/workspace")
                 add("/opencode/bin/opencode")
