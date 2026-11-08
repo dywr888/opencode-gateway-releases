@@ -8,28 +8,45 @@
 
     <TextView
         android:id="@+id/status"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:textSize="16sp"
-        android:layout_marginTop="24dp" />
+        android:textSize="15sp"
+        android:layout_marginTop="16dp"
+        android:gravity="center" />
 
     <ProgressBar
         android:id="@+id/progress"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="16dp"
+        android:layout_marginTop="12dp"
         android:visibility="gone" />
 
     <Button
+        android:id="@+id/pickBtn"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="@string/pick_project"
+        android:layout_marginTop="16dp" />
+
+    <TextView
+        android:id="@+id/projectPath"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="12sp"
+        android:text="@string/no_project"
+        android:gravity="center"
+        android:layout_marginTop="4dp" />
+
+    <Button
         android:id="@+id/startBtn"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/start"
         android:layout_marginTop="16dp" />
 
     <Button
         android:id="@+id/openBtn"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/open_ui"
         android:enabled="false"
@@ -37,9 +54,19 @@
 
     <Button
         android:id="@+id/stopBtn"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="@string/stop"
         android:enabled="false"
         android:layout_marginTop="8dp" />
+
+    <TextView
+        android:id="@+id/gatewayInfo"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:textSize="11sp"
+        android:layout_marginTop="16dp"
+        android:gravity="center"
+        android:textIsSelectable="true"
+        android:text="" />
 </LinearLayout>
