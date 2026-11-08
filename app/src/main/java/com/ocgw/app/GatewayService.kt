@@ -156,7 +156,7 @@ class GatewayService : Service() {
         val builder = Notification.Builder(this, CHANNEL_ID)
             .setContentTitle("OpenCode")
             .setContentText(message)
-            .setSmallIcon(android.R.drawable.ic_menu_view)
+            .setSmallIcon(R.drawable.ic_notification)
             .setContentIntent(PendingIntent.getActivity(
                 this, 0,
                 Intent(this, MainActivity::class.java).apply { action = Intent.ACTION_MAIN },
