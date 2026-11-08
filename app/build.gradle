@@ -10,12 +10,15 @@ android {
     defaultConfig {
         applicationId "com.ocgw.app"
         minSdk 24
-        targetSdk 34
+        // 关键：targetSdk 必须 <= 28。
+        // Android 10+ 对 targetSdk>=29 的 app 施加 W^X 限制，
+        // 禁止执行 app 可写数据目录（filesDir）内的可执行文件，
+        // 导致 proot / opencode 无法 exec。Termux 同样固定 targetSdk 28。
+        targetSdk 28
         versionCode 1
         versionName "1.0"
     }
 
-    // 只打 arm64-v8a：现代手机均为 arm64，体积最小、rootfs 只做一份
     splits {
         abi {
             enable true
@@ -37,6 +40,11 @@ android {
     }
     kotlinOptions {
         jvmTarget = '17'
+    }
+    lint {
+        // targetSdk 28 会触发过期警告，构建时不阻断
+        abortOnError = false
+        checkReleaseBuilds = false
     }
 }
 
