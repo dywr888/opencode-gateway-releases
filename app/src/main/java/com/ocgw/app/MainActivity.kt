@@ -6,15 +6,12 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ActivityInfo
-import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
-import android.webkit.WebResourceError
-import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -25,28 +22,37 @@ import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import org.json.JSONObject
+import java.net.HttpURLConnection
+import java.net.URL
+import java.util.concurrent.Executors
 
 /**
- * 主页：选项目 → 启动 → 自动进入 Web UI（完整功能）。
- * WebView 优化：加载进度条、错误重试页、硬件加速、缓存、自动鉴权。
+ * 主页：状态条 + 接入信息 + 启动/停止/管理/日志/选目录。
+ * 进度用横向进度条 + 百分比。
  */
 class MainActivity : ComponentActivity() {
 
     private lateinit var status: TextView
+    private lateinit var statusDot: View
     private lateinit var progress: ProgressBar
     private lateinit var progressText: TextView
     private lateinit var startBtn: Button
-    private lateinit var openBtn: Button
     private lateinit var stopBtn: Button
+    private lateinit var manageBtn: Button
+    private lateinit var logBtn: Button
     private lateinit var pickBtn: Button
+    private lateinit var baseUrl: TextView
+    private lateinit var apiKey: TextView
+    private lateinit var modelInfo: TextView
     private lateinit var projectPath: TextView
-    private lateinit var gatewayInfo: TextView
 
     private var uiUrl: String? = null
     private var uiPassword: String? = null
     private var gatewayUrl: String? = null
     private var webView: WebView? = null
     private var showingWeb = false
+    private val io = Executors.newSingleThreadExecutor()
 
     private val pickDir = registerForActivityResult(
         ActivityResultContracts.OpenDocumentTree()
@@ -78,38 +84,38 @@ class MainActivity : ComponentActivity() {
                         if (pct >= 0) {
                             progress.isIndeterminate = false
                             progress.progress = pct
-                            progressText.text = "$pct%"
+                            progressText.text = "$pct%  $message"
                         } else {
                             progress.isIndeterminate = true
                             progressText.text = message
                         }
-                        status.text = message
                         setRunning(false)
+                        setStatus("准备中 · $message", false)
                     }
                     GatewayService.PHASE_RUNNING -> {
                         progress.visibility = View.GONE
                         progressText.visibility = View.GONE
-                        status.text = "已就绪"
                         uiUrl = intent.getStringExtra(GatewayService.EXTRA_URL)
                         uiPassword = intent.getStringExtra(GatewayService.EXTRA_PASSWORD)
                         gatewayUrl = intent.getStringExtra(GatewayService.EXTRA_GATEWAY)
                         setRunning(true)
-                        gatewayInfo.text = gatewayUrl ?: ""
-                        openWebUI()
+                        setStatus("运行中 · 端口 4318", true)
+                        baseUrl.text = gatewayUrl ?: "http://127.0.0.1:4318/v1"
+                        loadModelInfo()
                     }
                     GatewayService.PHASE_STOPPED -> {
                         progress.visibility = View.GONE
                         progressText.visibility = View.GONE
-                        status.text = "已停止"
                         setRunning(false)
+                        setStatus("未启动 · 端口 4318", false)
                         uiUrl = null; uiPassword = null; gatewayUrl = null
-                        gatewayInfo.text = ""
+                        modelInfo.text = "启动后显示可用模型"
                     }
                     GatewayService.PHASE_FAILED -> {
                         progress.visibility = View.GONE
                         progressText.visibility = View.GONE
-                        status.text = message
                         setRunning(false)
+                        setStatus("启动失败", false)
                         Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
                     }
                 }
@@ -117,114 +123,115 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun setStatus(text: String, running: Boolean) {
+        status.text = text
+        statusDot.setBackgroundResource(
+            if (running) R.drawable.dot_green else R.drawable.dot_gray
+        )
+        status.setTextColor(if (running) 0xFF16A34A.toInt() else 0xFF666666.toInt())
+    }
+
     private fun setRunning(running: Boolean) {
         startBtn.isEnabled = !running
-        openBtn.isEnabled = running
         stopBtn.isEnabled = running
+        manageBtn.isEnabled = running
         pickBtn.isEnabled = !running
-        startBtn.text = if (running) "运行中" else "启动"
+        startBtn.alpha = if (running) 0.5f else 1f
+    }
+
+    /** 从网关拉模型数量 */
+    private fun loadModelInfo() {
+        val gw = gatewayUrl ?: return
+        io.execute {
+            var text = "免费模型已就绪"
+            try {
+                val conn = (URL("$gw/models").openConnection() as HttpURLConnection).apply {
+                    connectTimeout = 5000
+                    readTimeout = 5000
+                }
+                val body = conn.inputStream.bufferedReader().readText()
+                conn.disconnect()
+                val arr = JSONObject(body).optJSONArray("data")
+                if (arr != null && arr.length() > 0) {
+                    val names = mutableListOf<String>()
+                    for (i in 0 until minOf(arr.length(), 3)) {
+                        names.add(arr.getJSONObject(i).optString("id").substringAfter('/'))
+                    }
+                    text = "${arr.length()} 个 · ${names.joinToString("、")} 等"
+                }
+            } catch (_: Exception) {}
+            val finalText = text
+            runOnUiThread { modelInfo.text = finalText }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // 锁定竖屏
         requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
         setContentView(R.layout.activity_main)
 
         status = findViewById(R.id.status)
+        statusDot = findViewById(R.id.statusDot)
         progress = findViewById(R.id.progress)
         progressText = findViewById(R.id.progressText)
         startBtn = findViewById(R.id.startBtn)
-        openBtn = findViewById(R.id.openBtn)
         stopBtn = findViewById(R.id.stopBtn)
+        manageBtn = findViewById(R.id.manageBtn)
+        logBtn = findViewById(R.id.logBtn)
         pickBtn = findViewById(R.id.pickBtn)
+        baseUrl = findViewById(R.id.baseUrl)
+        apiKey = findViewById(R.id.apiKey)
+        modelInfo = findViewById(R.id.modelInfo)
         projectPath = findViewById(R.id.projectPath)
-        gatewayInfo = findViewById(R.id.gatewayInfo)
 
-        status.text = "未启动"
-        progressText.text = ""
-        progress.progress = 0
-        progress.visibility = View.GONE
-        progressText.visibility = View.GONE
+        setStatus("未启动 · 端口 4318", false)
         setRunning(false)
         refreshProjectLabel()
 
         startBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_START) }
         stopBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_STOP) }
-        openBtn.setOnClickListener { openWebUI() }
+        manageBtn.setOnClickListener { openWebUI() }
+        logBtn.setOnClickListener { showLog() }
         pickBtn.setOnClickListener { pickDir.launch(null) }
+    }
+
+    private fun showLog() {
+        val f = java.io.File(cacheDir, "opencode.log")
+        val text = if (f.exists()) {
+            val lines = f.readLines()
+            lines.takeLast(60).joinToString("\n").ifBlank { "（日志为空）" }
+        } else "（还没有日志，先启动一次）"
+        android.app.AlertDialog.Builder(this)
+            .setTitle("运行日志（最后 60 行）")
+            .setMessage(text)
+            .setPositiveButton("关闭", null)
+            .show()
     }
 
     @SuppressLint("SetJavaScriptEnabled")
     private fun openWebUI() {
-        val url = uiUrl ?: return
+        val url = uiUrl ?: run {
+            Toast.makeText(this, "还没就绪", Toast.LENGTH_SHORT).show()
+            return
+        }
         val password = uiPassword ?: return
 
         val wv = webView ?: WebView(this).apply {
-            // 硬件加速
-            setLayerType(View.LAYER_TYPE_HARDWARE, null)
-
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
                 databaseEnabled = true
-                allowFileAccess = false
-                allowContentAccess = false
                 javaScriptCanOpenWindowsAutomatically = true
                 setSupportMultipleWindows(true)
                 loadWithOverviewMode = true
                 useWideViewPort = true
-                builtInZoomControls = false
-                displayZoomControls = false
                 cacheMode = WebSettings.LOAD_DEFAULT
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                textZoom = 100
-                // 允许 file 协议 / 本地资源（opencode 有内部接口）
-                setGeolocationEnabled(false)
             }
-
-            webViewClient = object : WebViewClient() {
-                override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
-                    // 页面开始加载
-                }
-                override fun onPageFinished(view: WebView?, url: String?) {
-                    // 页面加载完成
-                }
-                @SuppressLint("WebViewClientOnReceivedError")
-                override fun onReceivedError(
-                    view: WebView?, request: WebResourceRequest?, error: WebResourceError?
-                ) {
-                    // 只处理主框架错误
-                    if (request?.isForMainFrame == true && error != null) {
-                        showWebError(error.description?.toString() ?: "加载失败")
-                    }
-                }
-                override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean {
-                    val u = request?.url?.toString() ?: return false
-                    if (u.startsWith("http")) {
-                        view?.loadUrl(u)
-                        return true
-                    }
-                    return false
-                }
-            }
-
-            webChromeClient = object : WebChromeClient() {
-                override fun onProgressChanged(view: WebView?, newProgress: Int) {
-                    // 用系统返回键提示不做了，静默
-                }
-            }
-
-            // 全屏沉浸
-            systemUiVisibility = (View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                or View.SYSTEM_UI_FLAG_FULLSCREEN
-                or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                or View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                or View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                or View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN)
+            webViewClient = WebViewClient()
+            webChromeClient = WebChromeClient()
         }.also { webView = it }
 
-        // Cookie 自动鉴权
         val token = android.util.Base64.encodeToString(
             "opencode:$password".toByteArray(), android.util.Base64.NO_WRAP
         )
@@ -239,17 +246,10 @@ class MainActivity : ComponentActivity() {
         showingWeb = true
     }
 
-    private fun showWebError(detail: String) {
-        // 简单弹提示，让用户返回重试
-        runOnUiThread {
-            Toast.makeText(this, "页面加载失败：$detail\n可点「打开 Web UI」重试", Toast.LENGTH_LONG).show()
-        }
-    }
-
     private fun refreshProjectLabel() {
         val uri = ProjectStore.load(this)
         projectPath.text = if (uri == null) {
-            getString(R.string.no_project)
+            "未选择项目目录"
         } else {
             "项目：" + ProjectStore.displayName(this, uri)
         }
@@ -277,22 +277,12 @@ class MainActivity : ComponentActivity() {
 
     @Deprecated("Deprecated in Java")
     override fun onBackPressed() {
-        if (showingWeb && webView?.canGoBack() == true) {
-            webView?.goBack()
-        } else if (showingWeb) {
+        if (showingWeb) {
             showingWeb = false
             setContentView(R.layout.activity_main)
-            status = findViewById(R.id.status)
-            progress = findViewById(R.id.progress)
-            progressText = findViewById(R.id.progressText)
-            startBtn = findViewById(R.id.startBtn)
-            openBtn = findViewById(R.id.openBtn)
-            stopBtn = findViewById(R.id.stopBtn)
-            pickBtn = findViewById(R.id.pickBtn)
-            projectPath = findViewById(R.id.projectPath)
-            gatewayInfo = findViewById(R.id.gatewayInfo)
-            status.text = "已就绪"
-            setRunning(true)
+            rebindViews()
+            setRunning(uiUrl != null)
+            setStatus(if (uiUrl != null) "运行中 · 端口 4318" else "未启动 · 端口 4318", uiUrl != null)
             refreshProjectLabel()
         } else {
             @Suppress("DEPRECATION")
@@ -300,7 +290,31 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun rebindViews() {
+        status = findViewById(R.id.status)
+        statusDot = findViewById(R.id.statusDot)
+        progress = findViewById(R.id.progress)
+        progressText = findViewById(R.id.progressText)
+        startBtn = findViewById(R.id.startBtn)
+        stopBtn = findViewById(R.id.stopBtn)
+        manageBtn = findViewById(R.id.manageBtn)
+        logBtn = findViewById(R.id.logBtn)
+        pickBtn = findViewById(R.id.pickBtn)
+        baseUrl = findViewById(R.id.baseUrl)
+        apiKey = findViewById(R.id.apiKey)
+        modelInfo = findViewById(R.id.modelInfo)
+        projectPath = findViewById(R.id.projectPath)
+
+        startBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_START) }
+        stopBtn.setOnClickListener { startServiceCompat(GatewayService.ACTION_STOP) }
+        manageBtn.setOnClickListener { openWebUI() }
+        logBtn.setOnClickListener { showLog() }
+        pickBtn.setOnClickListener { pickDir.launch(null) }
+        if (gatewayUrl != null) loadModelInfo()
+    }
+
     override fun onDestroy() {
+        io.shutdownNow()
         webView?.destroy()
         webView = null
         super.onDestroy()
