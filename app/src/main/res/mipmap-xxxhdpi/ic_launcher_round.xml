@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <!-- 背景圆（圆角正方形适配圆形图标） -->
+    <path
+        android:fillColor="#4F7CFF"
+        android:pathData="M12,0 L96,0 C102.6,0 108,5.4 108,12 L108,96 C108,102.6 102.6,108 96,108 L12,108 C5.4,108 0,102.6 0,96 L0,12 C0,5.4 5.4,0 12,0 Z" />
+    <!-- 终端/代码符号 -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M30,27 L45,42 L30,57" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M78,27 L63,42 L78,57" />
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M48,40 L60,40"
+        android:strokeWidth="2"
+        android:strokeColor="#FFFFFF"
+        android:strokeLineCap="round" />
+</vector>
