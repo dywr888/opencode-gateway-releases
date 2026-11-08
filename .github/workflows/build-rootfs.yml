@@ -6,6 +6,9 @@ on:
       - 'rootfs/**'
       - '.github/workflows/build-rootfs.yml'
 
+permissions:
+  contents: write
+
 jobs:
   rootfs:
     runs-on: ubuntu-24.04-arm
