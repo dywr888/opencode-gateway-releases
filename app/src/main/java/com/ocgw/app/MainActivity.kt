@@ -171,7 +171,7 @@ class MainActivity : ComponentActivity() {
                 allowFileAccess = false
                 allowContentAccess = false
                 javaScriptCanOpenWindowsAutomatically = true
-                supportMultipleWindows = true
+                setSupportMultipleWindows(true)
                 loadWithOverviewMode = true
                 useWideViewPort = true
                 builtInZoomControls = false
