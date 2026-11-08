@@ -44,7 +44,19 @@ class GatewayService : Service() {
 
         const val ORIGINAL =
             "https://github.com/dormantxxy/opencode-gateway-releases/releases/download/rootfs/rootfs-arm64.tar.gz"
-        val MIRRORS = listOf("https://gh-proxy.com/", "https://ghproxy.net/", "")
+        val MIRRORS = listOf(
+            "https://gh-proxy.com/",
+            "https://ghproxy.net/",
+            "https://gh-proxy.top/",
+            "https://gh.ddlc.top/",
+            "https://gh.llkk.cc/",
+            "https://ghfast.top/",
+            "https://gh.ddlc.top/",
+            "https://git.yiuman.com/",
+            "https://git.886.be/",
+            "https://gh.nyc3.sosnw.com/",
+            "",
+        )
 
         private val FALLBACK_DNS = listOf("223.5.5.5", "114.114.114.114", "8.8.8.8")
 
@@ -198,25 +210,39 @@ class GatewayService : Service() {
     private fun pickFastestMirror(): String {
         var best = ORIGINAL
         var bestMs = Long.MAX_VALUE
-        for (prefix in MIRRORS) {
-            val url = prefix + ORIGINAL
-            try {
-                val conn = (URL(url).openConnection() as HttpURLConnection).apply {
-                    connectTimeout = 6000
-                    readTimeout = 8000
-                    setRequestProperty("Range", "bytes=0-1023")
+        // 并发测速，取最快
+        val results = mutableListOf<Pair<String, Long>>()
+        val tasks = MIRRORS.map { prefix ->
+            Thread {
+                val url = prefix + ORIGINAL
+                try {
+                    val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+                        connectTimeout = 5000
+                        readTimeout = 8000
+                        setRequestProperty("Range", "bytes=0-1023")
+                    }
+                    val t0 = System.currentTimeMillis()
+                    val code = conn.responseCode
+                    val ms = System.currentTimeMillis() - t0
+                    conn.disconnect()
+                    if (code == 200 || code == 206) {
+                        synchronized(results) { results.add(prefix to ms.toLong()) }
+                        Log.i("GatewayService", "mirror '$prefix' -> $code in ${ms}ms")
+                    }
+                } catch (e: Exception) {
+                    Log.w("GatewayService", "mirror '$prefix' failed: ${e.message}")
                 }
-                val t0 = System.currentTimeMillis()
-                val code = conn.responseCode
-                val ms = System.currentTimeMillis() - t0
-                conn.disconnect()
-                Log.i("GatewayService", "mirror '$prefix' -> $code in ${ms}ms")
-                if ((code == 200 || code == 206) && ms < bestMs) { bestMs = ms; best = url }
-            } catch (e: Exception) {
-                Log.w("GatewayService", "mirror '$prefix' failed: ${e.message}")
-            }
+            }.also { it.start() }
+        }.also { threads ->
+            threads.forEach { it.join(8000) } // 最多等 8 秒
         }
-        return best
+        // 选最快
+        if (results.isNotEmpty()) {
+            val (bestUrl, bestTime) = results.minByOrNull { it.second } ?: return ORIGINAL
+            Log.i("GatewayService", "selected mirror: $bestUrl (${bestTime}ms)")
+            return bestUrl + ORIGINAL
+        }
+        return ORIGINAL
     }
 
     private fun remoteSize(url: String): Long = try {
