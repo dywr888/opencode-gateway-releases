@@ -2,7 +2,7 @@
 <resources>
     <string name="app_name">OpenCode Gateway</string>
     <string name="channel_status">状态：</string>
-    <string name="start">启动网关</string>
+    <string name="start">启动</string>
     <string name="stop">停止</string>
     <string name="open_ui">打开 Web UI</string>
     <string name="downloading">正在下载运行环境…</string>
@@ -11,4 +11,6 @@
     <string name="running">运行中</string>
     <string name="stopped">已停止</string>
     <string name="failed">失败：%1$s</string>
+    <string name="pick_project">选择项目目录</string>
+    <string name="no_project">未选择项目（使用空 /workspace）</string>
 </resources>
