@@ -14,7 +14,6 @@ import android.util.Log
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.TimeUnit
 
 /**
  * 前台服务：拉起 opencode serve（proot + rootfs）+ 本地 OpenAI 兼容网关。
@@ -121,10 +120,6 @@ class GatewayService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                if (Companion.running) {
-                    Log.i("GatewayService", "already running; ignore duplicate START")
-                    return START_NOT_STICKY
-                }
                 val alreadyReady = ready(File(filesDir, "rootfs"))
                 val initial = if (alreadyReady) "正在启动…" else "正在准备运行环境…"
                 startForeground(NOTIF_ID, buildNotification(initial, true, 0))
@@ -132,21 +127,15 @@ class GatewayService : Service() {
                 synchronized(lock) {
                     if (busy) {
                         Log.i("GatewayService", "busy; ignore duplicate START")
-                        return START_NOT_STICKY
+                        return START_STICKY
                     }
                     busy = true
-                    stopping = false
                 }
                 startGatewayAsync()
             }
             ACTION_STOP -> stopGateway()
-            else -> {
-                // 被系统以 null intent 拉起：不再自动启动，直接退出，避免“停不掉”
-                Log.i("GatewayService", "restarted without action; stopSelf")
-                stopGateway()
-            }
         }
-        return START_NOT_STICKY
+        return START_STICKY
     }
 
     private fun createChannel() {
@@ -213,6 +202,7 @@ class GatewayService : Service() {
     }
 
     private fun startGatewayAsync() {
+        stopping = false
         Thread {
             try {
                 val root = File(filesDir, "rootfs")
@@ -315,7 +305,6 @@ class GatewayService : Service() {
     } catch (_: Exception) { -1L }
 
     private fun startServer(root: File) {
-        if (stopping) return
         publish(PHASE_STARTING, "正在启动…", true, progress = 0)
         writeResolvConf(root)
 
@@ -336,7 +325,6 @@ class GatewayService : Service() {
 
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         serverPassword = password
-        // 网关不校验 API Key，保持为空，客户端留空即可
         Companion.apiKey = ""
 
         val prootBin = File(root, "proot/bin/proot").absolutePath
@@ -374,11 +362,6 @@ class GatewayService : Service() {
 
         val p = builder.start()
         proc = p
-        if (stopping) {
-            // 启动过程中用户点了停止：立刻回收
-            killProcessTree()
-            return
-        }
         val logFile = File(cacheDir, "opencode.log")
         Thread {
             try {
@@ -395,12 +378,10 @@ class GatewayService : Service() {
 
         val url = "http://127.0.0.1:$OPENCODE_PORT"
         if (!waitForReady(url, password)) {
-            if (stopping) return
             publish(PHASE_FAILED, "服务启动失败，请查看日志", false, progress = -1)
             stopSelf()
             return
         }
-        if (stopping) return
 
         // 2) 起本地 OpenAI 兼容网关
         val token = android.util.Base64.encodeToString(
@@ -415,15 +396,15 @@ class GatewayService : Service() {
         )
         gw.start()
         gateway = gw
-        if (stopping) {
-            try { gw.stop() } catch (_: Exception) {}
-            gateway = null
-            return
-        }
 
         val gatewayUrl = "http://127.0.0.1:$GATEWAY_PORT/v1"
         publish(PHASE_RUNNING, "已就绪", true, url, password, gatewayUrl, progress = 100)
         Log.i("GatewayService", "READY ui=$url gateway=$gatewayUrl workspace=${ws.absolutePath}")
+
+        // 3) 启动双向同步：监听 workspace 变化并写回 SAF 目录
+        if (projectUri != null) {
+            Thread { syncBackLoop(ws, projectUri) }.start()
+        }
     }
 
     /** 就绪判定：200 即可；401/403/500 也说明 HTTP 服务已起来，容错接受 */
@@ -538,79 +519,61 @@ class GatewayService : Service() {
         Log.i("GatewayService", "rootfs ready at ${dest.absolutePath}")
     }
 
-    /** 彻底停止：关闭网关 → 杀掉 proot/opencode（含遗留进程）→ 清理状态 → 退出服务。 */
+    /** 双向同步：每 3 秒检查 workspace mtime，有变化写回 SAF */
+    private fun syncBackLoop(ws: File, uri: Uri) {
+        var lastCheck = 0L
+        while (!stopping) {
+            try {
+                Thread.sleep(3000)
+                if (stopping) break
+                // 只扫 mtime 变化的文件（简单粗暴：记录每个文件 mtime）
+                val changed = mutableListOf<File>()
+                fun walk(f: File) {
+                    if (f.isDirectory) {
+                        f.listFiles()?.forEach { walk(it) }
+                    } else if (f.lastModified() > lastCheck) {
+                        changed.add(f)
+                    }
+                }
+                walk(ws)
+                if (changed.isNotEmpty()) {
+                    Log.i("GatewayService", "detected ${changed.size} changed files, syncing back...")
+                    ProjectStore.syncFromWorkspace(this, uri, changed)
+                }
+                lastCheck = System.currentTimeMillis()
+            } catch (_: Exception) {}
+        }
+    }
+
     private fun stopGateway() {
         stopping = true
         synchronized(lock) { busy = false }
         try { gateway?.stop() } catch (_: Exception) {}
         gateway = null
-        killProcessTree()
+        // 先尝试正常 destroy
+        try { proc?.destroy() } catch (_: Exception) {}
+        proc = null
+        // 再强制 kill 所有 proot/opencode 相关进程（防止残留）
+        try {
+            Runtime.getRuntime().exec("pkill -9 -f proot").waitFor()
+            Runtime.getRuntime().exec("pkill -9 -f opencode").waitFor()
+        } catch (_: Exception) {}
         try { wakeLock?.release() } catch (_: Exception) {}
         wakeLock = null
-        resetState()
-        Companion.lastError = null
-        publish(PHASE_STOPPED, "已停止", false, progress = -1)
-        // 让主页显示“未启动”，而不是“准备中…”
-        Companion.progressPct = -1
-        Companion.progressMsg = ""
-        stopForeground(STOP_FOREGROUND_REMOVE)
-        stopSelf()
-    }
-
-    /** 杀掉 proot 进程树，并清理同一 uid 下遗留的 opencode/proot 进程。 */
-    private fun killProcessTree() {
-        val p = proc
-        proc = null
-        if (p != null) {
-            try { p.destroy() } catch (_: Exception) {}
-            try {
-                if (!p.waitFor(2, TimeUnit.SECONDS)) {
-                    p.destroyForcibly()
-                    p.waitFor(2, TimeUnit.SECONDS)
-                }
-            } catch (_: Exception) {
-                try { p.destroyForcibly() } catch (_: Exception) {}
-            }
-        }
-        try {
-            val myPid = android.os.Process.myPid()
-            File("/proc").listFiles()?.forEach { dir ->
-                val pid = dir.name.toIntOrNull() ?: return@forEach
-                if (pid == myPid) return@forEach
-                val cmd = try {
-                    File(dir, "cmdline").readBytes().toString(Charsets.UTF_8).replace('\u0000', ' ')
-                } catch (_: Exception) { "" }
-                val isOc = cmd.contains("/opencode/bin/opencode") ||
-                    (cmd.contains("/proot/bin/proot") && cmd.contains("opencode"))
-                if (isOc) {
-                    Log.i("GatewayService", "killing leftover pid=$pid $cmd")
-                    try {
-                        ProcessBuilder("/system/bin/kill", "-9", pid.toString()).start().waitFor()
-                    } catch (_: Exception) {}
-                }
-            }
-        } catch (_: Exception) {}
-    }
-
-    private fun resetState() {
         Companion.running = false
-        Companion.progressPct = -1
-        Companion.progressMsg = ""
         Companion.uiUrl = null
         Companion.uiPassword = null
         Companion.gatewayUrl = null
-        Companion.apiKey = ""
-        Companion.modelSummary = ""
+        publish(PHASE_STOPPED, "已停止", false, progress = -1)
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
     }
 
     override fun onDestroy() {
         stopping = true
         try { gateway?.stop() } catch (_: Exception) {}
-        gateway = null
-        killProcessTree()
+        try { proc?.destroy() } catch (_: Exception) {}
         try { wakeLock?.release() } catch (_: Exception) {}
-        wakeLock = null
-        resetState()
         super.onDestroy()
     }
 }
