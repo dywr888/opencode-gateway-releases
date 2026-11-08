@@ -4,21 +4,41 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 背景圆（圆角正方形适配圆形图标） -->
+    <!-- 圆角正方形背景（适配圆形图标裁剪） -->
     <path
-        android:fillColor="#4F7CFF"
-        android:pathData="M12,0 L96,0 C102.6,0 108,5.4 108,12 L108,96 C108,102.6 102.6,108 96,108 L12,108 C5.4,108 0,102.6 0,96 L0,12 C0,5.4 5.4,0 12,0 Z" />
-    <!-- 终端/代码符号 -->
+        android:pathData="M12,0 L96,0 C102.6,0 108,5.4 108,12 L108,96 C108,102.6 102.6,108 96,108 L12,108 C5.4,108 0,102.6 0,96 L0,12 C0,5.4 5.4,0 12,0 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="54"
+                android:centerY="54"
+                android:gradientRadius="60"
+                android:startColor="#4F7CFF"
+                android:endColor="#1E3A8A" />
+        </aapt:attr>
+    </path>
+    <!-- 内发光圆环 -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M30,27 L45,42 L30,57" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M78,27 L63,42 L78,57" />
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M48,40 L60,40"
-        android:strokeWidth="2"
-        android:strokeColor="#FFFFFF"
-        android:strokeLineCap="round" />
+        android:pathData="M54,14 C76.08,14 94,31.92 94,54 C94,76.08 76.08,94 54,94 C31.92,94 14,76.08 14,54 C14,31.92 31.92,14 54,14 Z"
+        android:strokeWidth="1.5"
+        android:strokeColor="#60A5FA"
+        android:fillColor="#00000000" />
+    <!-- 代码符号 -->
+    <group android:translateX="54" android:translateY="54">
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M-22,-15 L-8,0 L-22,15" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M22,-15 L8,0 L22,15" />
+        <path
+            android:fillColor="#60A5FA"
+            android:pathData="M-3,-3 L3,-3 L3,3 L-3,3 Z" />
+        <path
+            android:fillColor="#FFFFFF"
+            android:pathData="M-3,12 L3,12 L3,18 L-3,18 Z" />
+        <path
+            android:fillColor="#60A5FA"
+            android:pathData="M-3,-18 L3,-18 L3,-12 L-3,-12 Z" />
+    </group>
 </vector>
