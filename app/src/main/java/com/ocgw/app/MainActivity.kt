@@ -5,7 +5,9 @@ import android.app.AlertDialog
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
 import android.graphics.Color
@@ -76,7 +78,28 @@ class MainActivity : ComponentActivity() {
         sbh = statusBarHeight()
         applyBars(bg)
         setContentView(buildPage())
+        ensureStoragePerm()
         refreshLoop()
+    }
+
+    /** 文件工具要能读写 /sdcard，必须先拿到存储权限（targetSdk 28 + legacy storage） */
+    private fun ensureStoragePerm() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        val need = ArrayList<String>()
+        for (p in arrayOf(
+            Manifest.permission.READ_EXTERNAL_STORAGE,
+            Manifest.permission.WRITE_EXTERNAL_STORAGE
+        )) {
+            if (androidx.core.content.ContextCompat.checkSelfPermission(this, p) != PackageManager.PERMISSION_GRANTED) {
+                need.add(p)
+            }
+        }
+        if (need.isEmpty()) return
+        try {
+            requestPermissions(need.toTypedArray(), 1001)
+        } catch (e: Exception) {
+            Toast.makeText(this, "申请存储权限失败: ${e.message}", Toast.LENGTH_SHORT).show()
+        }
     }
 
     private fun applyPalette() {
@@ -137,14 +160,17 @@ class MainActivity : ComponentActivity() {
         val infoCard = card()
         infoCard.addView(sectionTitle("接入信息"))
         baseVal = addRow(infoCard, "Base URL", "http://127.0.0.1:4318/v1", true)
-        keyVal = addRow(infoCard, "API Key", "（无需填写）", true)
+        keyVal = addRow(infoCard, "API Key", "无需填写", true)
         modelsVal = addRow(infoCard, "模型", "—", false)
 
         // 按钮卡片
         val actionCard = card()
         val r1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         startBtn = pillBtn("启动", green) { startGateway() }
-        stopBtn = pillBtn("停止", red) { stopGateway() }
+        stopBtn = pillBtn("停止", red) {
+            stopService(Intent(this@MainActivity, GatewayService::class.java))
+            statusPill?.text = "●  已停止"; statusPill?.setTextColor(dim)
+        }
         stopBtn?.alpha = 0.45f
         r1.addView(startBtn); r1.addView(space(dp(12))); r1.addView(stopBtn)
         actionCard.addView(r1)
@@ -266,25 +292,9 @@ class MainActivity : ComponentActivity() {
     // ---------------- 行为 ----------------
 
     private fun startGateway() {
-        if (GatewayService.running) {
-            statusPill?.text = "●  运行中 · 端口 ${GatewayService.actualPort}"
-            statusPill?.setTextColor(green)
-            return
-        }
         val i = Intent(this, GatewayService::class.java).apply { action = GatewayService.ACTION_START }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(i) else startService(i)
         statusPill?.text = "●  启动中…"; statusPill?.setTextColor(amber)
-    }
-
-    /** 真正停止：发送 ACTION_STOP，由服务杀掉 proot/opencode 并 stopSelf。 */
-    private fun stopGateway() {
-        statusPill?.text = "●  正在停止…"; statusPill?.setTextColor(amber)
-        val i = Intent(this, GatewayService::class.java).apply { action = GatewayService.ACTION_STOP }
-        try {
-            startService(i)
-        } catch (_: Exception) {
-            try { stopService(Intent(this@MainActivity, GatewayService::class.java)) } catch (_: Exception) {}
-        }
     }
 
     /** 1.5 秒轮询刷新（照 OurFreeModel） */
@@ -295,6 +305,7 @@ class MainActivity : ComponentActivity() {
             val err = GatewayService.lastError
             val pct = GatewayService.progressPct
             val msg = GatewayService.progressMsg
+            val key = GatewayService.apiKey
 
             if (running) {
                 statusPill?.text = "●  运行中 · 端口 $port"
@@ -327,7 +338,7 @@ class MainActivity : ComponentActivity() {
             }
 
             baseVal?.text = "http://127.0.0.1:$port/v1"
-            keyVal?.text = "（无需填写）"
+            keyVal?.text = "无需填写"
             if (running) {
                 modelsVal?.text = GatewayService.modelSummary.ifEmpty { "加载中…" }
             } else {
