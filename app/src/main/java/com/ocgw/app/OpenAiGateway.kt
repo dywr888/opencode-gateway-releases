@@ -319,6 +319,7 @@ class OpenAiGateway(
             val prompt = buildInitialPrompt(messages, catalog)
 
             var reply = ask(sessionId, providerID, modelID, prompt)
+            reply = ensureUseful(sessionId, providerID, modelID, reply)
             var steps = 0
             var executed = 0
             var finals = reply.trim()
@@ -349,8 +350,10 @@ class OpenAiGateway(
                 steps++
                 val text = fb.toString() + "继续。若已得到最终答案，直接用纯文本回答用户（不要再输出 tool_call 代码块）。"
                 reply = ask(sessionId, providerID, modelID, text)
+                reply = ensureUseful(sessionId, providerID, modelID, reply)
             }
 
+            finals = cleanFinal(finals)
             if (finals.isBlank()) finals = reply.trim()
 
             hbActive = false
@@ -520,6 +523,7 @@ class OpenAiGateway(
                 lastChange = System.currentTimeMillis()
             }
             if (s.done) {
+                if (lastText.isNotEmpty()) Log.d(TAG, "assistant raw: " + lastText.take(300))
                 if (lastText.isBlank()) {
                     if (s.error != null) throw RuntimeException(upperErr(s.error))
                     Thread.sleep(600)
@@ -534,6 +538,41 @@ class OpenAiGateway(
         }
         if (lastText.isNotEmpty()) return lastText
         throw RuntimeException("上游超时（${TURN_TIMEOUT_MS / 1000}s）")
+    }
+
+    /** 空、[]、{}、空代码块 都算无效回复，需要追问一次 */
+    private fun isUselessReply(t: String): Boolean {
+        var s = t.trim()
+        if (s.isEmpty()) return true
+        s = s.replace(Regex("(?is)```(?:tool_call|tool_calls|tool|tools|json|ocgw)?\\s*```"), "").trim()
+        if (s.isEmpty()) return true
+        return Regex("^\\[\\s*\\]$|^\\{\\s*\\}$|^null$|^None$|^\"\"$").matches(s)
+    }
+
+    /** 追问模型：你上一次回复无效，请用自然语言直接回答 */
+    private fun ensureUseful(sid: String, providerID: String, modelID: String, reply: String): String {
+        var cur = reply
+        var tries = 0
+        while (isUselessReply(cur) && tries < 2) {
+            tries++
+            Log.w(TAG, "useless reply #$tries: '${cur.take(120)}'")
+            cur = ask(
+                sid, providerID, modelID,
+                "你上一次的回复是无效的（" + (if (cur.isBlank()) "完全为空" else "内容：" + cur.take(60)) + "）。" +
+                    "请直接用自然语言回答用户刚才的问题。不要输出 tool_call 代码块，不要输出 JSON，" +
+                    "不要输出 [] 或 {}，不要输出空内容。如果你需要先调用工具，就输出 tool_call 代码块（内容是非空 JSON 数组）。"
+            )
+        }
+        return cur
+    }
+
+    /** 输出兜底：剥掉残留的空代码块 / 空数组 / 空对象 */
+    private fun cleanFinal(t: String): String {
+        var s = t
+        s = s.replace(Regex("(?is)```(?:tool_call|tool_calls|tool|tools|json|ocgw)?\\s*(\\[\\s*\\]|\\{\\s*\\})\\s*```"), "")
+        s = s.replace(Regex("(?is)^\\s*(\\[\\s*\\]|\\{\\s*\\})\\s*$"), "")
+        s = s.replace(Regex("(?is)```\\s*```"), "")
+        return s.trim()
     }
 
     private fun upperErr(e: String): String = when {
@@ -608,6 +647,9 @@ class OpenAiGateway(
             appendLine()
             appendLine("- 可以一次放多个调用")
             appendLine("- 输出代码块后就停下，等 App 把 <tool_result name=\"...\">…</tool_result> 发回来")
+            appendLine("- **不需要任何工具时，直接用自然语言回答用户**，绝对不要输出 tool_call 代码块")
+            appendLine("- 绝对不要输出空的 [] 或 {} 或空代码块，那不是合法回复")
+            appendLine("- 回答用户时用中文（或用户提问的语言），不要用 JSON")
             appendLine("- 收到结果后继续；全部完成时直接输出给用户的最终答复，**纯文本**，不要再带 tool_call 块")
             appendLine("- 不要输出「我将要读取…」这类空话，直接调用")
             appendLine()
