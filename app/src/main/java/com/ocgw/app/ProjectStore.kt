@@ -67,6 +67,7 @@ object ProjectStore {
                     }
                     val name = child.name ?: continue
                     if (name.startsWith(".")) continue
+                    if (name == ".git") continue
                     val target = File(out, name)
                     if (child.isDirectory) {
                         walk(child, target)
@@ -109,6 +110,7 @@ object ProjectStore {
                 for (file in srcDir.listFiles() ?: emptyArray()) {
                     val name = file.name
                     if (name.startsWith(".")) continue
+                    if (name == ".git") continue
                     val child = dir.findFile(name)
                     if (file.isDirectory) {
                         val childDir: DocumentFile = child ?: dir.createDirectory(name) ?: return
