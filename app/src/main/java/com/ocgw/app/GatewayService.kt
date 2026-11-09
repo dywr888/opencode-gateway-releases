@@ -324,6 +324,11 @@ class GatewayService : Service() {
             containerWs.deleteRecursively()
         }
 
+        // VCS 兜底：OpenCode 打开项目时会调 /api/vcs/init，
+        // 若容器内缺 git 或目录不是仓库，就会返回 503（UI 报 "VCS initialization failed"）。
+        // 这里在容器里先跑一次 git init（缺 git 时静默跳过，不阻塞启动）。
+        ensureGitRepo(root, ws)
+
         val password = (0..15).map { "0123456789abcdef"[(Math.random() * 16).toInt()] }.joinToString("")
         serverPassword = password
         Companion.apiKey = ""
@@ -406,6 +411,65 @@ class GatewayService : Service() {
         // 3) 启动双向同步：监听 workspace 变化并写回 SAF 目录
         if (projectUri != null) {
             Thread { syncBackLoop(ws, projectUri) }.start()
+        }
+    }
+
+    /**
+     * 在容器内确保 /workspace 是一个 git 仓库。
+     * 用 proot 执行，不依赖宿主；git 不存在时直接放弃（不影响启动）。
+     * 同时写入一份 .gitignore，避免把缓存/构建产物纳入版本库。
+     */
+    private fun ensureGitRepo(root: File, ws: File) {
+        try {
+            // 宿主侧先放 .gitignore（走文件系统，不需要容器）
+            val gi = File(ws, ".gitignore")
+            if (!gi.exists()) {
+                gi.writeText(
+                    """
+                    node_modules/
+                    .cache/
+                    dist/
+                    build/
+                    *.log
+                    .DS_Store
+                    """.trimIndent() + "\n"
+                )
+            }
+            val dotGit = File(ws, ".git")
+            if (dotGit.exists()) return
+
+            val prootBin = File(root, "proot/bin/proot").absolutePath
+            val prootLib = File(root, "proot/lib").absolutePath
+            val prootLoader = File(root, "proot/libexec/loader").absolutePath
+            if (!File(prootBin).exists()) return
+
+            val cmd = listOf(
+                prootBin, "-r", root.absolutePath,
+                "-b", "/dev", "-b", "/proc", "-b", "/sys",
+                "-b", "${ws.absolutePath}:/workspace",
+                "-w", "/workspace",
+                "/bin/sh", "-c",
+                "command -v git >/dev/null 2>&1 || exit 127; " +
+                    "git rev-parse --git-dir >/dev/null 2>&1 && exit 0; " +
+                    "git init -q . && git config user.email ocgw@localhost && " +
+                    "git config user.name OpenCode && git add -A >/dev/null 2>&1; " +
+                    "git -c user.email=ocgw@localhost -c user.name=OpenCode commit -q -m 'init' >/dev/null 2>&1; " +
+                    "exit 0"
+            )
+            val pb = ProcessBuilder(cmd).directory(root).redirectErrorStream(true)
+            pb.environment().clear()
+            pb.environment()["HOME"] = "/root"
+            pb.environment()["PATH"] = "/usr/local/bin:/usr/bin:/bin"
+            pb.environment()["TMPDIR"] = "/tmp"
+            pb.environment()["LD_LIBRARY_PATH"] = prootLib
+            pb.environment()["PROOT_LOADER"] = prootLoader
+            pb.environment()["PROOT_TMP_DIR"] = cacheDir.absolutePath
+            val p = pb.start()
+            val out = p.inputStream.bufferedReader().readText()
+            val rc = p.waitFor()
+            Log.i("GatewayService", "ensureGitRepo rc=$rc out=${out.take(200)}")
+        } catch (e: Exception) {
+            Log.w("GatewayService", "ensureGitRepo skipped: ${e.message}")
         }
     }
 
