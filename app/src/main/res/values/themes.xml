@@ -2,5 +2,12 @@
 <resources>
     <style name="Theme.OCGW" parent="Theme.Material3.DayNight.NoActionBar">
         <item name="android:windowFullscreen">false</item>
+        <!-- 沉浸式：内容画到系统栏下面，栏本身透明 -->
+        <item name="android:windowDrawsSystemBarBackgrounds">true</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:enforceStatusBarContrast">false</item>
+        <item name="android:enforceNavigationBarContrast">false</item>
     </style>
 </resources>
