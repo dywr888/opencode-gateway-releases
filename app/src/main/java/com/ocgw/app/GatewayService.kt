@@ -393,6 +393,7 @@ class GatewayService : Service() {
             opencodeBase = url,
             opencodeAuthToken = token,
             defaultModel = DEFAULT_MODEL,
+            toolRunner = ToolRunner(this, ws),
             onStatus = { Log.i("GatewayService", "gateway: $it") },
         )
         gw.start()
