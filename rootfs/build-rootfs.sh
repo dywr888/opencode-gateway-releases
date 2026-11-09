@@ -32,6 +32,29 @@ if [ -f /etc/ssl/certs/ca-certificates.crt ]; then
   cp -f /etc/ssl/certs/ca-certificates.crt "$ROOT/etc/ssl/certs/ca-certificates.crt"
 fi
 
+echo "== 3.5) git (OpenCode /api/vcs/init needs real git, otherwise 503) =="
+cat > "$ROOT/etc/apt/sources.list" <<'SRC'
+deb http://ports.ubuntu.com/ubuntu-ports noble main universe
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates main universe
+SRC
+mkdir -p "$ROOT/dev" "$ROOT/proc"
+mount -t proc /proc "$ROOT/proc" 2>/dev/null || true
+mount --bind /dev "$ROOT/dev" 2>/dev/null || true
+if chroot "$ROOT" /bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y --no-install-recommends git ca-certificates" >/tmp/git-install.log 2>&1; then
+  echo "git installed via apt"
+else
+  echo "WARN: apt install git failed, tail of log:"
+  tail -20 /tmp/git-install.log || true
+fi
+umount "$ROOT/proc" 2>/dev/null || true
+umount "$ROOT/dev" 2>/dev/null || true
+rm -rf "$ROOT/var/lib/apt/lists"/* "$ROOT/var/cache/apt/archives"/*.deb 2>/dev/null || true
+if [ -x "$ROOT/usr/bin/git" ]; then
+  echo "git ok: $(chroot "$ROOT" /usr/bin/git --version 2>/dev/null || echo present)"
+else
+  echo "WARN: no git inside rootfs, VCS will be unavailable"
+fi
+
 echo "== 3) opencode 二进制 =="
 mkdir -p "$ROOT/opencode/bin" /tmp/ocpkg
 curl -fsSL "$OC_TGZ" -o /tmp/oc.tgz
